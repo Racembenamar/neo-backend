@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 import { addMinutes } from 'date-fns';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
@@ -325,7 +325,7 @@ ownerRouter.post('/qr-payment', handleAsync(async (req: Request, res: Response) 
       playerId,
       storeId,
       pointsToDeduct,
-      token: uuidv4(),
+      token: randomUUID(),
       expiresAt: addMinutes(new Date(), 5),
     },
   });
