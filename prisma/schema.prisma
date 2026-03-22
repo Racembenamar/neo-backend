@@ -1,0 +1,142 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Admin {
+  id           String   @id @default(uuid())
+  username     String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  @@map("admins")
+}
+
+model Player {
+  id           String        @id @default(uuid())
+  username     String        @unique
+  passwordHash String
+  name         String
+  phone        String?
+  storeLinks   PlayerStore[]
+  sessions     Session[]
+  qrPayments   QrPayment[]
+  ownedStore   Store?        @relation("StoreOwner")
+  createdAt    DateTime      @default(now())
+
+  @@map("players")
+}
+
+model Store {
+  id          String        @id @default(uuid())
+  name        String
+  address     String?
+  phone       String?
+  logoUrl     String?
+  isActive    Boolean       @default(true)
+  owner       Player        @relation("StoreOwner", fields: [ownerId], references: [id])
+  ownerId     String        @unique
+  gameTypes   GameType[]
+  playerLinks PlayerStore[]
+  sessions    Session[]
+  tierConfig  TierConfig?
+  qrPayments  QrPayment[]
+  createdAt   DateTime      @default(now())
+
+  @@map("stores")
+}
+
+model PlayerStore {
+  id             String   @id @default(uuid())
+  player         Player   @relation(fields: [playerId], references: [id])
+  playerId       String
+  store          Store    @relation(fields: [storeId], references: [id])
+  storeId        String
+  tier           Int      @default(1)
+  totalPoints    Int      @default(0)
+  pendingUpgrade Boolean  @default(false)
+  joinedAt       DateTime @default(now())
+
+  @@unique([playerId, storeId])
+  @@map("player_stores")
+}
+
+model TierConfig {
+  id                 String @id @default(uuid())
+  store              Store  @relation(fields: [storeId], references: [id])
+  storeId            String @unique
+  tier1Threshold     Int    @default(0)
+  tier2Threshold     Int    @default(1000)
+  tier3Threshold     Int    @default(5000)
+  tier1Pct           Float  @default(5)
+  tier2Pct           Float  @default(10)
+  tier3Pct           Float  @default(15)
+  pointsPerDt        Int    @default(50)
+
+  @@map("tier_configs")
+}
+
+model GameType {
+  id           String        @id @default(uuid())
+  store        Store         @relation(fields: [storeId], references: [id])
+  storeId      String
+  name         String
+  pricingMode  String        // "hourly" | "per_game"
+  pricePerUnit Float
+  isActive     Boolean       @default(true)
+  sessionItems SessionItem[]
+
+  @@map("game_types")
+}
+
+model Session {
+  id             String        @id @default(uuid())
+  store          Store         @relation(fields: [storeId], references: [id])
+  storeId        String
+  player         Player        @relation(fields: [playerId], references: [id])
+  playerId       String
+  items          SessionItem[]
+  totalAmount    Float
+  pointsEarned   Int
+  paidWithPoints Int           @default(0)
+  isPaid         Boolean       @default(false)
+  syncedAt       DateTime?
+  createdAt      DateTime      @default(now())
+
+  @@map("sessions")
+}
+
+model SessionItem {
+  id         String   @id @default(uuid())
+  session    Session  @relation(fields: [sessionId], references: [id])
+  sessionId  String
+  gameType   GameType @relation(fields: [gameTypeId], references: [id])
+  gameTypeId String
+  quantity   Float
+  subtotal   Float
+
+  @@map("session_items")
+}
+
+model QrPayment {
+  id             String   @id @default(uuid())
+  player         Player   @relation(fields: [playerId], references: [id])
+  playerId       String
+  store          Store    @relation(fields: [storeId], references: [id])
+  storeId        String
+  pointsToDeduct Int
+  token          String   @unique @default(uuid())
+  isUsed         Boolean  @default(false)
+  expiresAt      DateTime
+  createdAt      DateTime @default(now())
+
+  @@map("qr_payments")
+}
