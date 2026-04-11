@@ -10,30 +10,80 @@ export const authRouter = Router();
 
 const loginSchema = z.object({
   username: z.string().min(1),
-  password: z.string().min(1),
-  role: z.enum(['admin', 'owner', 'player']),
+  password: z.string().min(1)
 });
+
+const playerRegisterSchema = z.object({
+  username: z.string().min(3),
+  password: z.string().min(6),
+  name: z.string().min(2),
+  phone: z.string().optional(),
+});
+
+// POST /api/auth/register
+authRouter.post('/register', handleAsync(async (req: Request, res: Response) => {
+  const { username, password, name, phone } = playerRegisterSchema.parse(req.body);
+  
+  const existing = await prisma.player.findUnique({ where: { username } });
+  if (existing) {
+    res.status(400).json({ error: 'Username already exists' });
+    return;
+  }
+  const existAdmin = await prisma.admin.findUnique({ where: { username } });
+  if (existAdmin) {
+    res.status(400).json({ error: 'Username already exists' });
+    return;
+  }
+
+  const passwordHash = await bcrypt.hash(password, 10);
+  const player = await prisma.player.create({
+    data: { username, passwordHash, name, phone }
+  });
+
+  const token = jwt.sign(
+    { id: player.id, role: 'player' },
+    process.env.JWT_SECRET!,
+    { expiresIn: '30d' }
+  );
+
+  res.status(201).json({
+    token,
+    user: {
+      id: player.id,
+      username: player.username,
+      name: player.name,
+      avatarSeed: player.avatarSeed,
+      role: 'player',
+      storeId: undefined,
+    },
+  });
+}));
 
 // POST /api/auth/login
 authRouter.post('/login', handleAsync(async (req: Request, res: Response) => {
-  const { username, password, role } = loginSchema.parse(req.body);
+  const { username, password } = loginSchema.parse(req.body);
 
-  let user: { id: string; username: string; passwordHash: string; name?: string } | null = null;
+  let user: any = null;
+  let role: string = '';
   let storeId: string | undefined = undefined;
 
-  if (role === 'admin') {
-    user = await prisma.admin.findUnique({ where: { username } });
-  } else if (role === 'owner') {
+  const admin = await prisma.admin.findUnique({ where: { username } });
+  
+  if (admin) {
+    user = admin;
+    role = 'admin';
+  } else {
     const player = await prisma.player.findUnique({
       where: { username },
       include: { ownedStore: true },
     });
     if (player) {
       user = player;
-      storeId = player.ownedStore?.id;
+      role = player.ownedStore ? 'owner' : 'player';
+      if (player.ownedStore) {
+        storeId = player.ownedStore.id;
+      }
     }
-  } else {
-    user = await prisma.player.findUnique({ where: { username } });
   }
 
   if (!user) {
@@ -58,7 +108,8 @@ authRouter.post('/login', handleAsync(async (req: Request, res: Response) => {
     user: {
       id: user.id,
       username: user.username,
-      name: (user as any).name ?? user.username,
+      name: user.name ?? user.username,
+      avatarSeed: user.avatarSeed,
       role,
       storeId,
     },
@@ -84,6 +135,7 @@ authRouter.get('/me', requireAuth, handleAsync(async (req: Request, res: Respons
     username: player!.username,
     name: player!.name,
     phone: player!.phone,
+    avatarSeed: player!.avatarSeed,
     role,
     storeId: player!.ownedStore?.id,
     stores: player!.storeLinks,

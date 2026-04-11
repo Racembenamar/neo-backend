@@ -349,9 +349,13 @@ const tierConfigSchema = z.object({
   tier1Threshold: z.number().int().min(0).optional(),
   tier2Threshold: z.number().int().positive().optional(),
   tier3Threshold: z.number().int().positive().optional(),
+  tier4Threshold: z.number().int().positive().optional(),
+  tier5Threshold: z.number().int().positive().optional(),
   tier1Pct: z.number().min(0).max(100).optional(),
   tier2Pct: z.number().min(0).max(100).optional(),
   tier3Pct: z.number().min(0).max(100).optional(),
+  tier4Pct: z.number().min(0).max(100).optional(),
+  tier5Pct: z.number().min(0).max(100).optional(),
   pointsPerDt: z.number().int().positive().optional(),
 });
 
@@ -368,6 +372,63 @@ ownerRouter.put('/tier-config', handleAsync(async (req: Request, res: Response) 
     data,
   });
   res.json(config);
+}));
+
+// ─────────────────────────────────────────────
+// PRODUCTS (SHOP)
+// ─────────────────────────────────────────────
+
+const productSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().optional(),
+  priceInPoints: z.number().int().positive(),
+  imageUrl: z.string().optional(),
+});
+
+ownerRouter.get('/products', handleAsync(async (req: Request, res: Response) => {
+  const products = await prisma.product.findMany({
+    where: { storeId: req.user!.storeId! },
+    orderBy: { createdAt: 'desc' },
+  });
+  res.json(products);
+}));
+
+ownerRouter.post('/products', handleAsync(async (req: Request, res: Response) => {
+  const data = productSchema.parse(req.body);
+  const product = await prisma.product.create({
+    data: { ...data, storeId: req.user!.storeId! },
+  });
+  res.status(201).json(product);
+}));
+
+ownerRouter.put('/products/:id', handleAsync(async (req: Request, res: Response) => {
+  const data = productSchema.partial().parse(req.body);
+  const product = await prisma.product.update({
+    where: { id: String(req.params.id) },
+    data,
+  });
+  res.json(product);
+}));
+
+ownerRouter.delete('/products/:id', handleAsync(async (req: Request, res: Response) => {
+  await prisma.product.delete({
+    where: { id: String(req.params.id) },
+  });
+  res.json({ success: true });
+}));
+
+ownerRouter.patch('/products/:id/toggle', handleAsync(async (req: Request, res: Response) => {
+  const current = await prisma.product.findUnique({ where: { id: String(req.params.id) } });
+  if (!current) {
+    res.status(404).json({ error: 'Product not found' });
+    return;
+  }
+  
+  const product = await prisma.product.update({
+    where: { id: String(req.params.id) },
+    data: { isActive: !current.isActive },
+  });
+  res.json(product);
 }));
 
 // ─────────────────────────────────────────────
@@ -437,7 +498,6 @@ ownerRouter.get('/reports/monthly', handleAsync(async (req: Request, res: Respon
       gameCounts[name].revenue += item.subtotal;
     });
   });
-
   res.json({
     month: firstOfMonth.toISOString().split('T')[0].slice(0, 7),
     totalRevenue: +totalRevenue.toFixed(3),
@@ -448,4 +508,121 @@ ownerRouter.get('/reports/monthly', handleAsync(async (req: Request, res: Respon
       .sort((a, b) => a.date.localeCompare(b.date)),
   });
 }));
+
+// ─────────────────────────────────────────────
+// TOURNAMENTS
+// ─────────────────────────────────────────────
+
+const tournamentSchema = z.object({
+  name: z.string().min(1),
+  date: z.string().or(z.date()), // accepts ISO string
+  prizePool: z.string().min(1),
+  entryPrice: z.string().optional(),
+  maxPlayers: z.number().int().positive(),
+  status: z.enum(['open', 'coming_soon', 'completed']).optional(),
+  imageUrl: z.string().optional(),
+});
+
+ownerRouter.get('/tournaments', handleAsync(async (req: Request, res: Response) => {
+  const tournaments = await prisma.tournament.findMany({
+    where: { storeId: req.user!.storeId! },
+    include: {
+      participants: {
+        include: {
+          player: { select: { id: true, username: true, name: true } },
+        },
+      },
+    },
+    orderBy: { date: 'asc' },
+  });
+  
+  res.json(tournaments);
+}));
+
+ownerRouter.post('/tournaments', handleAsync(async (req: Request, res: Response) => {
+  const data = tournamentSchema.parse(req.body);
+  const tournament = await prisma.tournament.create({
+    data: {
+      ...data,
+      date: new Date(data.date),
+      storeId: req.user!.storeId!,
+    },
+  });
+  res.status(201).json(tournament);
+}));
+
+ownerRouter.put('/tournaments/:id', handleAsync(async (req: Request, res: Response) => {
+  const data = tournamentSchema.partial().parse(req.body);
+  const updateData: any = { ...data };
+  if (data.date) updateData.date = new Date(data.date);
+  
+  const tournament = await prisma.tournament.update({
+    where: { id: String(req.params.id), storeId: req.user!.storeId! },
+    data: updateData,
+  });
+  res.json(tournament);
+}));
+
+ownerRouter.delete('/tournaments/:id', handleAsync(async (req: Request, res: Response) => {
+  await prisma.tournament.delete({
+    where: { id: String(req.params.id), storeId: req.user!.storeId! },
+  });
+  res.json({ success: true });
+}));
+
+ownerRouter.patch('/tournaments/:id/toggle', handleAsync(async (req: Request, res: Response) => {
+  const current = await prisma.tournament.findUnique({ where: { id: String(req.params.id) } });
+  if (!current) {
+    res.status(404).json({ error: 'Tournament not found' });
+    return;
+  }
+  const tournament = await prisma.tournament.update({
+    where: { id: String(req.params.id) },
+    data: { isActive: !current.isActive },
+  });
+  res.json(tournament);
+}));
+
+// ─────────────────────────────────────────────
+// TOURNAMENT PARTICIPANTS (APPROVAL/REJECTION)
+// ─────────────────────────────────────────────
+
+ownerRouter.put('/tournaments/:id/participants/:playerId', handleAsync(async (req: Request, res: Response) => {
+  const { status } = z.object({
+    status: z.enum(['pending', 'accepted', 'rejected'])
+  }).parse(req.body);
+  
+  const tournamentId = String(req.params.id);
+  const playerId = String(req.params.playerId);
+  const storeId = req.user!.storeId!;
+  
+  // Verify tournament belongs to owner
+  const tournament = await prisma.tournament.findUnique({
+    where: { id: tournamentId, storeId }
+  });
+  
+  if (!tournament) throw new AppError(404, 'Tournament not found');
+
+  const participant = await prisma.tournamentParticipant.update({
+    where: {
+      tournamentId_playerId: { tournamentId, playerId }
+    },
+    data: { status }
+  });
+  
+  // If status changed to accepted, we might want to update registeredPlayers count.
+  // Actually, we can count the accepted ones dynamically or increment/decrement here.
+  // For safety, let's recount all accepted participants and update the tournament
+  const acceptedCount = await prisma.tournamentParticipant.count({
+    where: { tournamentId, status: 'accepted' }
+  });
+  
+  await prisma.tournament.update({
+    where: { id: tournamentId },
+    data: { registeredPlayers: acceptedCount }
+  });
+
+  res.json({ participant, registeredPlayers: acceptedCount });
+}));
+
 

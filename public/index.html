@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>NEO - Portal</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    /* 
+      Karim Rashid Inspired Design:
+      - Vibrant yet soft colors (neon pinks, purples, white)
+      - Smooth organic shapes and capsule buttons
+      - Glassmorphism & soft glowing shadows
+      - Modern minimal typography 
+    */
+    :root {
+      --bg-color: #FDFCFD;
+      --surface: #FFFFFF;
+      --primary: #FF2A85;
+      --primary-glow: rgba(255, 42, 133, 0.4);
+      --accent: #A626FF;
+      --text-main: #2B1A2F;
+      --text-muted: #BBAEBF;
+      --border: rgba(255, 255, 255, 0.4);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: 'Inter', sans-serif;
+    }
+
+    body {
+      background-color: var(--bg-color);
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* Organic flowing background blobs */
+    .blob {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(60px);
+      z-index: 0;
+      animation: float 10s ease-in-out infinite alternate;
+    }
+
+    .blob-1 {
+      width: 400px; height: 400px;
+      background: rgba(166, 38, 255, 0.15); /* Purple soft glow */
+      top: -10vw; left: -10vw;
+    }
+    .blob-2 {
+      width: 500px; height: 500px;
+      background: rgba(255, 42, 133, 0.15); /* Pink soft glow */
+      bottom: -15vw; right: -5vw;
+      animation-duration: 12s;
+    }
+    .blob-3 {
+      width: 300px; height: 300px;
+      background: rgba(45, 227, 154, 0.1); /* Mint soft glow */
+      top: 40%; left: 60%;
+      animation-duration: 14s;
+    }
+
+    @keyframes float {
+      0% { transform: translate(0, 0) scale(1); }
+      100% { transform: translate(30px, -50px) scale(1.1); }
+    }
+
+    /* Glassmorphic Container */
+    .glass-panel {
+      position: relative;
+      z-index: 10;
+      width: 100%;
+      max-width: 420px;
+      padding: 40px;
+      background: rgba(255, 255, 255, 0.6);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-radius: 40px;
+      box-shadow: 
+        0 20px 40px rgba(0, 0, 0, 0.04),
+        inset 0 0 0 1px var(--border);
+      text-align: center;
+    }
+
+    /* Logo Squircle */
+    .logo-container {
+      margin-bottom: 30px;
+    }
+    .logo-squircle {
+      width: 80px; height: 80px;
+      background: var(--primary);
+      border-radius: 30px;
+      margin: 0 auto 15px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      box-shadow: 0 15px 30px var(--primary-glow);
+      color: #fff;
+      font-size: 32px;
+      font-weight: 800;
+    }
+
+    .title {
+      font-size: 28px;
+      color: var(--text-main);
+      font-weight: 700;
+      letter-spacing: 1px;
+    }
+    .subtitle {
+      font-size: 14px;
+      color: var(--text-muted);
+      margin-top: 5px;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+    }
+
+    /* Input styling - Sensual curves */
+    .input-group {
+      margin-bottom: 20px;
+      text-align: left;
+    }
+    .input-group label {
+      display: block;
+      font-size: 13px;
+      color: var(--text-main);
+      font-weight: 600;
+      margin-bottom: 8px;
+      margin-left: 15px;
+    }
+
+    .input-wrapper {
+      position: relative;
+    }
+    
+    input {
+      width: 100%;
+      height: 60px;
+      border-radius: 30px; /* Capsule shape */
+      border: 2px solid transparent;
+      background: var(--surface);
+      padding: 0 25px;
+      font-size: 16px;
+      color: var(--text-main);
+      box-shadow: 0 4px 15px rgba(0,0,0,0.02);
+      transition: all 0.3s ease;
+      outline: none;
+    }
+    
+    input::placeholder {
+      color: var(--text-muted);
+    }
+
+    input:focus {
+      border-color: var(--primary);
+      box-shadow: 0 8px 25px var(--primary-glow);
+      transform: translateY(-2px);
+    }
+
+    /* Capsule Button */
+    .btn {
+      width: 100%;
+      height: 60px;
+      border-radius: 30px;
+      background: var(--text-main);
+      color: #fff;
+      font-size: 16px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      border: none;
+      cursor: pointer;
+      margin-top: 15px;
+      box-shadow: 0 10px 20px rgba(43, 26, 47, 0.2);
+      transition: all 0.3s ease;
+    }
+
+    .btn:hover {
+      background: var(--primary);
+      box-shadow: 0 15px 30px var(--primary-glow);
+      transform: translateY(-3px);
+    }
+    .btn:active {
+      transform: translateY(1px);
+    }
+  </style>
+</head>
+<body>
+
+  <div class="blob blob-1"></div>
+  <div class="blob blob-2"></div>
+  <div class="blob blob-3"></div>
+
+  <div class="glass-panel">
+    <div class="logo-container">
+      <div class="logo-squircle">✨</div>
+      <div class="title">NEO</div>
+      <div class="subtitle">Enter Portal</div>
+    </div>
+
+    <form onsubmit="event.preventDefault(); alert('Sensual smooth login! (Demo)');">
+      <div class="input-group">
+        <label>Identificator</label>
+        <div class="input-wrapper">
+          <input type="text" placeholder="Enter your handle" required />
+        </div>
+      </div>
+
+      <div class="input-group">
+        <label>Passcode</label>
+        <div class="input-wrapper">
+          <input type="password" placeholder="••••••••" required />
+        </div>
+      </div>
+
+      <button type="submit" class="btn">Authenticate</button>
+    </form>
+  </div>
+
+</body>
+</html>

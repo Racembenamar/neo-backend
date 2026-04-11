@@ -90,3 +90,51 @@ adminRouter.patch('/stores/:id/toggle', handleAsync(async (req: Request, res: Re
   });
   res.json(updated);
 }));
+
+const updateStoreSchema = z.object({
+  name: z.string().min(2).optional(),
+  address: z.string().optional(),
+  phone: z.string().optional(),
+});
+
+// PUT /api/admin/stores/:id - update store details
+adminRouter.put('/stores/:id', handleAsync(async (req: Request, res: Response) => {
+  const { name, address, phone } = updateStoreSchema.parse(req.body);
+  
+  const store = await prisma.store.findUnique({ where: { id: String(req.params.id) } });
+  if (!store) throw new AppError(404, 'Store not found');
+
+  const updated = await prisma.store.update({
+    where: { id: String(req.params.id) },
+    data: { ...(name && { name }), address, phone },
+  });
+  res.json(updated);
+}));
+
+// DELETE /api/admin/stores/:id - delete store
+adminRouter.delete('/stores/:id', handleAsync(async (req: Request, res: Response) => {
+  const storeId = String(req.params.id);
+  const store = await prisma.store.findUnique({ where: { id: storeId } });
+  if (!store) throw new AppError(404, 'Store not found');
+
+  await prisma.$transaction(async (tx) => {
+    // Manually cascade delete dependent records
+    await tx.qrPayment.deleteMany({ where: { storeId } });
+    await tx.sessionItem.deleteMany({ where: { session: { storeId } } });
+    await tx.session.deleteMany({ where: { storeId } });
+    await tx.playerStore.deleteMany({ where: { storeId } });
+    await tx.gameType.deleteMany({ where: { storeId } });
+    await tx.tierConfig.deleteMany({ where: { storeId } });
+    await tx.product.deleteMany({ where: { storeId } });
+    await tx.tournamentParticipant.deleteMany({ where: { tournament: { storeId } } });
+    await tx.tournament.deleteMany({ where: { storeId } });
+    
+    // Finally delete the store
+    await tx.store.delete({ where: { id: storeId } });
+    
+    // We do NOT delete the player (owner) account, as they might have other roles or histories,
+    // or maybe we should? For now keeping it safe and retaining the user account.
+  });
+
+  res.status(204).send();
+}));

@@ -6,9 +6,8 @@ generator client {
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
 }
 
 model Admin {
@@ -26,10 +25,13 @@ model Player {
   passwordHash String
   name         String
   phone        String?
+  avatarSeed   String?
   storeLinks   PlayerStore[]
   sessions     Session[]
+  purchases    Purchase[]
   qrPayments   QrPayment[]
   ownedStore   Store?        @relation("StoreOwner")
+  tournaments  TournamentParticipant[]
   createdAt    DateTime      @default(now())
 
   @@map("players")
@@ -47,8 +49,11 @@ model Store {
   gameTypes   GameType[]
   playerLinks PlayerStore[]
   sessions    Session[]
+  purchases   Purchase[]
   tierConfig  TierConfig?
   qrPayments  QrPayment[]
+  products    Product[]
+  tournaments Tournament[]
   createdAt   DateTime      @default(now())
 
   @@map("stores")
@@ -76,9 +81,13 @@ model TierConfig {
   tier1Threshold     Int    @default(0)
   tier2Threshold     Int    @default(1000)
   tier3Threshold     Int    @default(5000)
+  tier4Threshold     Int    @default(10000)
+  tier5Threshold     Int    @default(25000)
   tier1Pct           Float  @default(5)
   tier2Pct           Float  @default(10)
   tier3Pct           Float  @default(15)
+  tier4Pct           Float  @default(20)
+  tier5Pct           Float  @default(25)
   pointsPerDt        Int    @default(50)
 
   @@map("tier_configs")
@@ -114,6 +123,19 @@ model Session {
   @@map("sessions")
 }
 
+model Purchase {
+  id            String   @id @default(uuid())
+  store         Store    @relation(fields: [storeId], references: [id])
+  storeId       String
+  player        Player   @relation(fields: [playerId], references: [id])
+  playerId      String
+  productName   String
+  pointsSpent   Int
+  createdAt     DateTime @default(now())
+
+  @@map("purchases")
+}
+
 model SessionItem {
   id         String   @id @default(uuid())
   session    Session  @relation(fields: [sessionId], references: [id])
@@ -139,4 +161,50 @@ model QrPayment {
   createdAt      DateTime @default(now())
 
   @@map("qr_payments")
+}
+
+model Product {
+  id            String   @id @default(uuid())
+  store         Store    @relation(fields: [storeId], references: [id])
+  storeId       String
+  name          String
+  description   String?
+  priceInPoints Int
+  imageUrl      String?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  @@map("products")
+}
+
+model Tournament {
+  id               String   @id @default(uuid())
+  store            Store    @relation(fields: [storeId], references: [id])
+  storeId          String
+  name             String
+  date             DateTime
+  prizePool        String
+  entryPrice       String?  @default("Gratuit")
+  maxPlayers       Int
+  registeredPlayers Int     @default(0)
+  status           String   @default("open")
+  isActive         Boolean  @default(true)
+  imageUrl         String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  participants     TournamentParticipant[]
+
+  @@map("tournaments")
+}
+
+model TournamentParticipant {
+  tournament   Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  tournamentId String
+  player       Player     @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  playerId     String
+  status       String     @default("pending") // pending, accepted, rejected
+  registeredAt DateTime   @default(now())
+
+  @@id([tournamentId, playerId])
+  @@map("tournament_participants")
 }
