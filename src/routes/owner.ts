@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { addMinutes } from 'date-fns';
 import { Prisma } from '@prisma/client';
+import { Expo } from 'expo-server-sdk';
 import { prisma } from '../lib/prisma';
 import { requireAuth, requireRole } from '../middleware/auth';
 import { handleAsync, AppError } from '../middleware/errorHandler';
@@ -623,6 +624,81 @@ ownerRouter.put('/tournaments/:id/participants/:playerId', handleAsync(async (re
   });
 
   res.json({ participant, registeredPlayers: acceptedCount });
+}));
+
+// ─────────────────────────────────────────────
+// NOTIFICATIONS
+// ─────────────────────────────────────────────
+
+const notificationSchema = z.object({
+  title: z.string().min(1),
+  body: z.string().min(1),
+});
+
+ownerRouter.post('/notifications', handleAsync(async (req: Request, res: Response) => {
+  const { title, body } = notificationSchema.parse(req.body);
+  const storeId = req.user!.storeId!;
+
+  // 1. Get all players for this store
+  const playerLinks = await prisma.playerStore.findMany({
+    where: { storeId },
+    select: { playerId: true }
+  });
+  const playerIds = playerLinks.map(l => l.playerId);
+
+  // 2. Get all device tokens for these players
+  const deviceTokens = await prisma.deviceToken.findMany({
+    where: { playerId: { in: playerIds } }
+  });
+
+  const pushTokens = deviceTokens.map(dt => dt.token);
+
+  // 3. Send using Expo
+  const expo = new Expo();
+  const messages = [];
+  for (const pushToken of pushTokens) {
+    if (!Expo.isExpoPushToken(pushToken)) {
+      continue;
+    }
+    messages.push({
+      to: pushToken,
+      sound: 'default' as const,
+      title,
+      body,
+      data: { storeId },
+    });
+  }
+
+  const chunks = expo.chunkPushNotifications(messages);
+  const tickets = [];
+  
+  for (const chunk of chunks) {
+    try {
+      const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
+      tickets.push(...ticketChunk);
+    } catch (error) {
+      console.error('Error sending push notification chunk:', error);
+    }
+  }
+
+  // 4. Save to DB
+  const notification = await prisma.notification.create({
+    data: {
+      storeId,
+      title,
+      body,
+    }
+  });
+
+  res.status(201).json({ success: true, notification, ticketsCount: tickets.length });
+}));
+
+ownerRouter.get('/notifications', handleAsync(async (req: Request, res: Response) => {
+  const notifications = await prisma.notification.findMany({
+    where: { storeId: req.user!.storeId! },
+    orderBy: { createdAt: 'desc' },
+  });
+  res.json(notifications);
 }));
 
 

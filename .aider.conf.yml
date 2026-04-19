@@ -1,0 +1,14 @@
+# Aider Configuration for Senior Architect (TabbyAPI)
+model: openai/qwopus-pro
+openai-api-base: http://127.0.0.1:8000/v1
+openai-api-key: 09d68820fba2cf5fa005a799dcd09337
+
+# Performance Settings
+edit-format: architect
+map-tokens: 1024
+
+# UX Settings
+dark-mode: true
+show-model-warnings: false
+check-update: false
+stream: true

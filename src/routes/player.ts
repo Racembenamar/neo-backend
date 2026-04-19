@@ -399,6 +399,20 @@ playerRouter.post('/tournaments/register', handleAsync(async (req: Request, res:
   res.status(201).json(participant);
 }));
 
+// POST /api/player/push-token - register device push token
+playerRouter.post('/push-token', handleAsync(async (req: Request, res: Response) => {
+  const { token } = z.object({ token: z.string().min(1) }).parse(req.body);
+  const playerId = req.user!.id;
+
+  const deviceToken = await prisma.deviceToken.upsert({
+    where: { token },
+    update: { playerId },
+    create: { token, playerId }
+  });
+
+  res.json({ success: true, deviceToken });
+}));
+
 // PUT /api/player/profile - update display name or phone
 playerRouter.put('/profile', handleAsync(async (req: Request, res: Response) => {
   const { name, phone, avatarSeed } = z.object({
