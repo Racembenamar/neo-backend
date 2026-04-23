@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { addMinutes } from 'date-fns';
 import { Prisma } from '@prisma/client';
-import { Expo } from 'expo-server-sdk';
+// Dynamic import used below for ESM compatibility
 import { prisma } from '../lib/prisma';
 import { requireAuth, requireRole } from '../middleware/auth';
 import { handleAsync, AppError } from '../middleware/errorHandler';
@@ -656,7 +656,8 @@ ownerRouter.post('/notifications', handleAsync(async (req: Request, res: Respons
 
   const pushTokens = deviceTokens.map(dt => dt.token);
 
-  // 3. Send using Expo
+  // 3. Send using Expo (Dynamic import for ESM compatibility)
+  const { Expo } = await import('expo-server-sdk');
   const expo = new Expo();
   const messages = [];
   for (const pushToken of pushTokens) {
