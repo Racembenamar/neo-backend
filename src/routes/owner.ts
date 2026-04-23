@@ -645,6 +645,9 @@ ownerRouter.post('/notifications', handleAsync(async (req: Request, res: Respons
     select: { playerId: true }
   });
   const playerIds = playerLinks.map(l => l.playerId);
+  
+  // ALSO add the owner's playerId so they get a copy of their own broadcast
+  playerIds.push(req.user!.id);
 
   // 2. Get all device tokens for these players
   const deviceTokens = await prisma.deviceToken.findMany({

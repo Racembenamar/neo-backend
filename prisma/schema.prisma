@@ -27,6 +27,7 @@ model Player {
   name         String
   phone        String?
   avatarSeed   String?
+  avatarUrl    String?
   storeLinks   PlayerStore[]
   sessions     Session[]
   purchases    Purchase[]

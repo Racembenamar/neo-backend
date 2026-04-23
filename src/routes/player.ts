@@ -415,15 +415,16 @@ playerRouter.post('/push-token', handleAsync(async (req: Request, res: Response)
 
 // PUT /api/player/profile - update display name or phone
 playerRouter.put('/profile', handleAsync(async (req: Request, res: Response) => {
-  const { name, phone, avatarSeed } = z.object({
+  const { name, phone, avatarSeed, avatarUrl } = z.object({
     name: z.string().min(2).optional(),
     phone: z.string().optional(),
     avatarSeed: z.string().optional(),
+    avatarUrl: z.string().optional(),
   }).parse(req.body);
   
   const updated = await prisma.player.update({
     where: { id: req.user!.id },
-    data: { name, phone, avatarSeed },
+    data: { name, phone, avatarSeed, avatarUrl },
   });
   
   res.json({ 
@@ -433,6 +434,7 @@ playerRouter.put('/profile', handleAsync(async (req: Request, res: Response) => 
       name: updated.name, 
       phone: updated.phone, 
       avatarSeed: updated.avatarSeed,
+      avatarUrl: updated.avatarUrl,
       role: 'player' 
     } 
   });
@@ -456,6 +458,23 @@ playerRouter.put('/reset-password', handleAsync(async (req: Request, res: Respon
     where: { id: player.id },
     data: { passwordHash },
   });
+
+  res.json({ success: true });
+}));
+
+// DELETE /api/player/profile - delete account
+playerRouter.delete('/profile', handleAsync(async (req: Request, res: Response) => {
+  const playerId = req.user!.id;
+
+  // Prisma will handle cascades if configured, but let's be safe
+  await prisma.$transaction([
+    prisma.playerStore.deleteMany({ where: { playerId } }),
+    prisma.session.deleteMany({ where: { playerId } }),
+    prisma.purchase.deleteMany({ where: { playerId } }),
+    prisma.deviceToken.deleteMany({ where: { playerId } }),
+    prisma.tournamentParticipant.deleteMany({ where: { playerId } }),
+    prisma.player.delete({ where: { id: playerId } }),
+  ]);
 
   res.json({ success: true });
 }));
