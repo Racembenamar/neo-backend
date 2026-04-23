@@ -1,7 +1,8 @@
 {
   "name": "neo-backend",
   "version": "1.0.0",
-  "main": "index.js",
+  "type": "module",
+  "main": "dist/index.js",
   "scripts": {
     "dev": "nodemon --watch src --ext ts --exec ts-node src/index.ts",
     "build": "tsc",
@@ -10,7 +11,7 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
     "prisma:seed": "ts-node prisma/seed.ts",
-    "vercel-build": "prisma generate && tsc"
+    "vercel-build": "npx prisma generate && tsc"
   },
   "keywords": [],
   "author": "",

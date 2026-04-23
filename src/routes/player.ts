@@ -423,7 +423,7 @@ playerRouter.put('/profile', handleAsync(async (req: Request, res: Response) => 
   }).parse(req.body);
   
   const updated = await prisma.player.update({
-    where: { id: req.user!.id },
+    where: { id: (req as any).user!.id },
     data: { name, phone, avatarSeed, avatarUrl },
   });
   
@@ -464,7 +464,7 @@ playerRouter.put('/reset-password', handleAsync(async (req: Request, res: Respon
 
 // DELETE /api/player/profile - delete account
 playerRouter.delete('/profile', handleAsync(async (req: Request, res: Response) => {
-  const playerId = req.user!.id;
+  const playerId = (req as any).user!.id;
 
   // Prisma will handle cascades if configured, but let's be safe
   await prisma.$transaction([
