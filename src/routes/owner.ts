@@ -557,6 +557,16 @@ ownerRouter.put('/tournaments/:id', handleAsync(async (req: Request, res: Respon
   const updateData: any = { ...data };
   if (data.date) updateData.date = new Date(data.date);
   
+  const existing = await prisma.tournament.findFirst({
+    where: { id: String(req.params.id), storeId: req.user!.storeId! }
+  });
+  if (!existing) {
+    throw new AppError(404, 'Tournament not found');
+  }
+  if (existing.status === 'completed' && data.status && data.status !== 'completed') {
+    throw new AppError(400, 'Cannot change the status of a completed tournament');
+  }
+
   const tournament = await prisma.tournament.update({
     where: { id: String(req.params.id), storeId: req.user!.storeId! },
     data: updateData,
@@ -649,6 +659,9 @@ ownerRouter.post('/tournaments/:id/start', handleAsync(async (req: Request, res:
     });
 
     const playerCount = acceptedParticipants.length;
+    if (playerCount < tournament.maxPlayers) {
+      throw new AppError(400, `Need all ${tournament.maxPlayers} accepted players to start (currently ${playerCount})`);
+    }
     if (playerCount < 2) {
       throw new AppError(400, 'Need at least 2 accepted players to start');
     }
