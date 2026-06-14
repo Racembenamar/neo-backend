@@ -530,7 +530,7 @@ ownerRouter.get('/tournaments', handleAsync(async (req: Request, res: Response) 
     include: {
       participants: {
         include: {
-          player: { select: { id: true, username: true, name: true } },
+          player: { select: { id: true, username: true, name: true, avatarUrl: true, avatarSeed: true } },
         },
       },
     },

@@ -428,7 +428,7 @@ playerRouter.get('/tournaments/:id/participants', handleAsync(async (req: Reques
   const participants = await prisma.tournamentParticipant.findMany({
     where: { tournamentId, status: 'accepted' },
     include: {
-      player: { select: { id: true, name: true, username: true } }
+      player: { select: { id: true, name: true, username: true, avatarUrl: true, avatarSeed: true } }
     },
     orderBy: { registeredAt: 'asc' }
   });
