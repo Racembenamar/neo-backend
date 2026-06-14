@@ -627,6 +627,245 @@ ownerRouter.put('/tournaments/:id/participants/:playerId', handleAsync(async (re
 }));
 
 // ─────────────────────────────────────────────
+// TOURNAMENT MATCHES & BRACKET ENGINE
+// ─────────────────────────────────────────────
+
+ownerRouter.post('/tournaments/:id/start', handleAsync(async (req: Request, res: Response) => {
+  const tournamentId = String(req.params.id);
+  const storeId = req.user!.storeId!;
+
+  const result = await prisma.$transaction(async (tx) => {
+    const tournament = await tx.tournament.findUnique({
+      where: { id: tournamentId, storeId }
+    });
+    if (!tournament) throw new AppError(404, 'Tournament not found');
+    if (tournament.status === 'completed' || tournament.status === 'in_progress') {
+      throw new AppError(400, 'Tournament has already started or completed');
+    }
+
+    const acceptedParticipants = await tx.tournamentParticipant.findMany({
+      where: { tournamentId, status: 'accepted' },
+      orderBy: { registeredAt: 'asc' }
+    });
+
+    const playerCount = acceptedParticipants.length;
+    if (playerCount < 2) {
+      throw new AppError(400, 'Need at least 2 accepted players to start');
+    }
+
+    // Calculate power of 2 bracket size
+    let bracketSize = 2;
+    while (bracketSize < playerCount) {
+      bracketSize *= 2;
+    }
+
+    const totalRounds = Math.log2(bracketSize);
+
+    // Update tournament status to in_progress
+    await tx.tournament.update({
+      where: { id: tournamentId },
+      data: { status: 'in_progress' }
+    });
+
+    // 1. Create all matches for all rounds as placeholders first
+    const createdMatches: any[] = [];
+    for (let r = 1; r <= totalRounds; r++) {
+      const matchCountInRound = bracketSize / Math.pow(2, r);
+      for (let idx = 0; idx < matchCountInRound; idx++) {
+        const m = await tx.match.create({
+          data: {
+            tournamentId,
+            round: r,
+            matchIndex: idx,
+            status: 'pending',
+          }
+        });
+        createdMatches.push(m);
+      }
+    }
+
+    // 2. Populate Round 1 matches with players
+    const round1Matches = createdMatches.filter(m => m.round === 1);
+    for (let idx = 0; idx < round1Matches.length; idx++) {
+      const match = round1Matches[idx];
+      const p1Idx = idx * 2;
+      const p2Idx = idx * 2 + 1;
+
+      const p1 = p1Idx < playerCount ? acceptedParticipants[p1Idx].playerId : null;
+      const p2 = p2Idx < playerCount ? acceptedParticipants[p2Idx].playerId : null;
+
+      let winnerId: string | null = null;
+      let status = 'pending';
+
+      if (p1 && !p2) {
+        winnerId = p1;
+        status = 'completed';
+      } else if (!p1 && p2) {
+        winnerId = p2;
+        status = 'completed';
+      }
+
+      const updatedMatch = await tx.match.update({
+        where: { id: match.id },
+        data: {
+          player1Id: p1,
+          player2Id: p2,
+          winnerId,
+          status,
+          player1Score: winnerId === p1 && p1 ? 1 : 0,
+          player2Score: winnerId === p2 && p2 ? 1 : 0,
+        }
+      });
+
+      // If completed (bye), advance player to next round
+      if (status === 'completed' && winnerId) {
+        const nextRound = 2;
+        const nextIndex = Math.floor(idx / 2);
+        const isPlayer1ForNext = idx % 2 === 0;
+
+        const nextMatchPlaceholder = createdMatches.find(
+          m => m.round === nextRound && m.matchIndex === nextIndex
+        );
+
+        if (nextMatchPlaceholder) {
+          await tx.match.update({
+            where: { id: nextMatchPlaceholder.id },
+            data: isPlayer1ForNext
+              ? { player1Id: winnerId }
+              : { player2Id: winnerId }
+          });
+        }
+      }
+    }
+
+    return { success: true };
+  });
+
+  res.json(result);
+}));
+
+ownerRouter.get('/tournaments/:id/matches', handleAsync(async (req: Request, res: Response) => {
+  const tournamentId = String(req.params.id);
+  const storeId = req.user!.storeId!;
+
+  const tournament = await prisma.tournament.findUnique({
+    where: { id: tournamentId, storeId }
+  });
+  if (!tournament) throw new AppError(404, 'Tournament not found');
+
+  const matches = await prisma.match.findMany({
+    where: { tournamentId },
+    include: {
+      player1: { select: { id: true, name: true, username: true } },
+      player2: { select: { id: true, name: true, username: true } },
+    },
+    orderBy: [
+      { round: 'asc' },
+      { matchIndex: 'asc' }
+    ]
+  });
+
+  res.json(matches);
+}));
+
+ownerRouter.put('/tournaments/:id/matches/:matchId/score', handleAsync(async (req: Request, res: Response) => {
+  const tournamentId = String(req.params.id);
+  const matchId = String(req.params.matchId);
+  const storeId = req.user!.storeId!;
+  const { player1Score, player2Score } = z.object({
+    player1Score: z.number().int().nonnegative(),
+    player2Score: z.number().int().nonnegative(),
+  }).parse(req.body);
+
+  const tournament = await prisma.tournament.findUnique({
+    where: { id: tournamentId, storeId }
+  });
+  if (!tournament) throw new AppError(404, 'Tournament not found');
+
+  const match = await prisma.match.findUnique({
+    where: { id: matchId, tournamentId }
+  });
+  if (!match) throw new AppError(404, 'Match not found');
+  if (match.status === 'completed') {
+    throw new AppError(400, 'Match is already completed');
+  }
+  if (!match.player1Id || !match.player2Id) {
+    throw new AppError(400, 'Cannot record score for match with missing players');
+  }
+
+  const winnerId = player1Score > player2Score ? match.player1Id : match.player2Id;
+
+  const result = await prisma.$transaction(async (tx) => {
+    const updatedMatch = await tx.match.update({
+      where: { id: matchId },
+      data: {
+        player1Score,
+        player2Score,
+        winnerId,
+        status: 'completed',
+      }
+    });
+
+    const allMatches = await tx.match.findMany({
+      where: { tournamentId }
+    });
+
+    const maxRound = Math.max(...allMatches.map(m => m.round));
+
+    if (match.round === maxRound) {
+      await tx.tournament.update({
+        where: { id: tournamentId },
+        data: { status: 'completed' }
+      });
+    } else {
+      const nextRound = match.round + 1;
+      const nextIndex = Math.floor(match.matchIndex / 2);
+      const isPlayer1ForNext = match.matchIndex % 2 === 0;
+
+      const nextMatch = await tx.match.findFirst({
+        where: { tournamentId, round: nextRound, matchIndex: nextIndex }
+      });
+
+      if (nextMatch) {
+        const updateData = isPlayer1ForNext
+          ? { player1Id: winnerId }
+          : { player2Id: winnerId };
+
+        await tx.match.update({
+          where: { id: nextMatch.id },
+          data: updateData
+        });
+      }
+    }
+
+    return updatedMatch;
+  });
+
+  res.json(result);
+}));
+
+ownerRouter.put('/tournaments/:id/matches/:matchId/status', handleAsync(async (req: Request, res: Response) => {
+  const tournamentId = String(req.params.id);
+  const matchId = String(req.params.matchId);
+  const storeId = req.user!.storeId!;
+  const { status, tableNumber } = z.object({
+    status: z.enum(['pending', 'live', 'completed']),
+    tableNumber: z.string().optional().nullable(),
+  }).parse(req.body);
+
+  const tournament = await prisma.tournament.findUnique({
+    where: { id: tournamentId, storeId }
+  });
+  if (!tournament) throw new AppError(404, 'Tournament not found');
+
+  const updated = await prisma.match.update({
+    where: { id: matchId, tournamentId },
+    data: { status, tableNumber }
+  });
+  res.json(updated);
+}));
+
+// ─────────────────────────────────────────────
 // NOTIFICATIONS
 // ─────────────────────────────────────────────
 

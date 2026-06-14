@@ -399,6 +399,42 @@ playerRouter.post('/tournaments/register', handleAsync(async (req: Request, res:
   res.status(201).json(participant);
 }));
 
+playerRouter.get('/tournaments/:id/matches', handleAsync(async (req: Request, res: Response) => {
+  const tournamentId = String(req.params.id);
+
+  const tournament = await prisma.tournament.findFirst({
+    where: { id: tournamentId, isActive: true }
+  });
+  if (!tournament) throw new AppError(404, 'Tournament not found or inactive');
+
+  const matches = await prisma.match.findMany({
+    where: { tournamentId },
+    include: {
+      player1: { select: { id: true, name: true, username: true } },
+      player2: { select: { id: true, name: true, username: true } },
+    },
+    orderBy: [
+      { round: 'asc' },
+      { matchIndex: 'asc' }
+    ]
+  });
+
+  res.json(matches);
+}));
+
+playerRouter.get('/tournaments/:id/participants', handleAsync(async (req: Request, res: Response) => {
+  const tournamentId = String(req.params.id);
+
+  const participants = await prisma.tournamentParticipant.findMany({
+    where: { tournamentId, status: 'accepted' },
+    include: {
+      player: { select: { id: true, name: true, username: true } }
+    },
+    orderBy: { registeredAt: 'asc' }
+  });
+  res.json(participants);
+}));
+
 // POST /api/player/push-token - register device push token
 playerRouter.post('/push-token', handleAsync(async (req: Request, res: Response) => {
   const { token } = z.object({ token: z.string().min(1) }).parse(req.body);
