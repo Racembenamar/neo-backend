@@ -203,42 +203,8 @@ playerRouter.post('/tier-upgrade', handleAsync(async (req: Request, res: Respons
   });
 }));
 
-// POST /api/player/qr-confirm - player scans QR and confirms payment
-playerRouter.post('/qr-confirm', handleAsync(async (req: Request, res: Response) => {
-  const { token } = z.object({ token: z.string().min(1) }).parse(req.body);
-  const playerId = req.user!.id;
 
-  const qr = await prisma.qrPayment.findUnique({ where: { token } });
-  if (!qr) throw new AppError(404, 'Invalid QR code');
-  if (qr.playerId !== playerId) throw new AppError(403, 'This QR code is not for you');
-  if (qr.isUsed) throw new AppError(400, 'QR code already used');
-  if (new Date() > qr.expiresAt) throw new AppError(400, 'QR code has expired');
 
-  const link = await prisma.playerStore.findUnique({
-    where: { playerId_storeId: { playerId, storeId: qr.storeId } },
-  });
-  if (!link || link.totalPoints < qr.pointsToDeduct) {
-    throw new AppError(400, 'Insufficient points');
-  }
-
-  // Deduct points and mark QR as used atomically
-  const [updatedLink] = await prisma.$transaction([
-    prisma.playerStore.update({
-      where: { playerId_storeId: { playerId, storeId: qr.storeId } },
-      data: { totalPoints: { decrement: qr.pointsToDeduct } },
-    }),
-    prisma.qrPayment.update({
-      where: { token },
-      data: { isUsed: true },
-    }),
-  ]);
-
-  res.json({
-    success: true,
-    pointsDeducted: qr.pointsToDeduct,
-    remainingPoints: updatedLink.totalPoints,
-  });
-}));
 
 // GET /api/player/game-stats/:storeId - chart data
 playerRouter.get('/game-stats/:storeId', handleAsync(async (req: Request, res: Response) => {

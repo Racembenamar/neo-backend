@@ -60,124 +60,30 @@ ownerRouter.delete('/games/:id', handleAsync(async (req: Request, res: Response)
 }));
 
 // ─────────────────────────────────────────────
-// PLAYERS
+// SCAN PLAYER (owner scans player's identity QR)
 // ─────────────────────────────────────────────
 
-const createPlayerSchema = z.object({
-  username: z.string().min(3),
-  password: z.string().min(6),
-  name: z.string().min(2),
-  phone: z.string().optional(),
-});
-
-ownerRouter.get('/players', handleAsync(async (req: Request, res: Response) => {
-  const players = await prisma.playerStore.findMany({
-    where: { storeId: req.user!.storeId! },
-    include: {
-      player: { select: { id: true, username: true, name: true, phone: true } },
-    },
-    orderBy: { joinedAt: 'desc' },
-  });
-  res.json(players);
-}));
-
-ownerRouter.post('/players', handleAsync(async (req: Request, res: Response) => {
-  const { username, password, name, phone } = createPlayerSchema.parse(req.body);
+ownerRouter.get('/scan-player/:playerId', handleAsync(async (req: Request, res: Response) => {
   const storeId = req.user!.storeId!;
+  const playerId = String(req.params.playerId);
 
-  // Check if username already exists
-  const existing = await prisma.player.findUnique({ where: { username } });
-
-  const passwordHash = await bcrypt.hash(password, 10);
-
-  const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-    let player = existing;
-    if (!player) {
-      player = await tx.player.create({
-        data: { username, passwordHash, name, phone },
-      });
-    }
-
-    // Check if already linked to this store
-    const alreadyLinked = await tx.playerStore.findUnique({
-      where: { playerId_storeId: { playerId: player.id, storeId } },
-    });
-    if (alreadyLinked) throw new AppError(409, 'Player already linked to this store');
-
-    const link = await tx.playerStore.create({
-      data: { playerId: player.id, storeId, tier: 1, totalPoints: 0 },
-    });
-    return { player, link };
-  });
-
-  res.status(201).json(result);
-}));
-
-ownerRouter.get('/players/:id', handleAsync(async (req: Request, res: Response) => {
-  const storeId = req.user!.storeId!;
-  const link = await prisma.playerStore.findUnique({
-    where: { playerId_storeId: { playerId: String(req.params.id), storeId } },
-    include: {
-      player: { select: { id: true, username: true, name: true, phone: true } },
-    },
-  });
-  if (!link) throw new AppError(404, 'Player not found in this store');
-
-  const sessions = await prisma.session.findMany({
-    where: { playerId: String(req.params.id), storeId },
-    include: { items: { include: { gameType: true } } },
-    orderBy: { createdAt: 'desc' },
-    take: 20,
-  });
-
-  res.json({ ...link, sessions });
-}));
-
-const updatePlayerSchema = z.object({
-  name: z.string().min(2).optional(),
-  phone: z.string().optional(),
-  password: z.string().min(6).optional(),
-});
-
-ownerRouter.put('/players/:id', handleAsync(async (req: Request, res: Response) => {
-  const storeId = req.user!.storeId!;
-  const playerId = String(req.params.id);
-
-  const link = await prisma.playerStore.findUnique({
-    where: { playerId_storeId: { playerId, storeId } },
-  });
-  if (!link) throw new AppError(404, 'Player not found in this store');
-
-  const { name, phone, password } = updatePlayerSchema.parse(req.body);
-  const updateData: any = {};
-  if (name !== undefined) updateData.name = name;
-  if (phone !== undefined) updateData.phone = phone;
-  if (password !== undefined) updateData.passwordHash = await bcrypt.hash(password, 10);
-
-  const player = await prisma.player.update({
+  const player = await prisma.player.findUnique({
     where: { id: playerId },
-    data: updateData,
     select: { id: true, username: true, name: true, phone: true },
   });
+  if (!player) throw new AppError(404, 'Player not found');
 
-  res.json({ player, link });
-}));
-
-ownerRouter.delete('/players/:id', handleAsync(async (req: Request, res: Response) => {
-  const storeId = req.user!.storeId!;
-  const playerId = String(req.params.id);
-
+  // Get store-specific points/tier — may not exist yet (first visit)
   const link = await prisma.playerStore.findUnique({
     where: { playerId_storeId: { playerId, storeId } },
   });
-  if (!link) throw new AppError(404, 'Player not found in this store');
 
-  // Remove only the store link — player account stays for other stores
-  await prisma.playerStore.delete({
-    where: { playerId_storeId: { playerId, storeId } },
+  res.json({
+    player,
+    totalPoints: link?.totalPoints ?? 0,
+    tier: link?.tier ?? 1,
+    isFirstVisit: !link,
   });
-
-  res.json({ success: true });
 }));
 
 // ─────────────────────────────────────────────
@@ -192,21 +98,35 @@ const sessionItemSchema = z.object({
 const createSessionSchema = z.object({
   playerId: z.string().min(1),
   items: z.array(sessionItemSchema).min(1),
+  pointsToDeduct: z.number().int().nonnegative().optional(), // direct deduction, no QR needed
 });
 
 ownerRouter.post('/sessions', handleAsync(async (req: Request, res: Response) => {
-  const { playerId, items } = createSessionSchema.parse(req.body);
+  const { playerId, items, pointsToDeduct = 0 } = createSessionSchema.parse(req.body);
   const storeId = req.user!.storeId!;
 
-  // Verify player is linked to this store
-  const playerLink = await prisma.playerStore.findUnique({
-    where: { playerId_storeId: { playerId, storeId } },
-  });
-  if (!playerLink) throw new AppError(404, 'Player not found in this store');
+  // Verify player exists
+  const player = await prisma.player.findUnique({ where: { id: playerId } });
+  if (!player) throw new AppError(404, 'Player not found');
 
   // Get tier config
   const tierConfig = await prisma.tierConfig.findUnique({ where: { storeId } });
   if (!tierConfig) throw new AppError(500, 'Store tier config not found');
+
+  // Auto-create PlayerStore link on first visit (no explicit join needed)
+  let playerLink = await prisma.playerStore.findUnique({
+    where: { playerId_storeId: { playerId, storeId } },
+  });
+  if (!playerLink) {
+    playerLink = await prisma.playerStore.create({
+      data: { playerId, storeId, tier: 1, totalPoints: 0 },
+    });
+  }
+
+  // Validate point deduction
+  if (pointsToDeduct > 0 && playerLink.totalPoints < pointsToDeduct) {
+    throw new AppError(400, `Insufficient points. Player has ${playerLink.totalPoints} pts, requested ${pointsToDeduct}`);
+  }
 
   // Get all game types for price calculation
   const gameTypeIds = items.map((i) => i.gameTypeId);
@@ -227,7 +147,7 @@ ownerRouter.post('/sessions', handleAsync(async (req: Request, res: Response) =>
 
   const totalAmount = +sessionItems.reduce((sum, i) => sum + i.subtotal, 0).toFixed(3);
   const pointsEarned = calculatePointsEarned(totalAmount, playerLink.tier, tierConfig);
-  const newTotalPoints = playerLink.totalPoints + pointsEarned;
+  const newTotalPoints = playerLink.totalPoints + pointsEarned - pointsToDeduct;
   const pendingUpgrade = checkPendingUpgrade(newTotalPoints, playerLink.tier, tierConfig);
 
   // Persist everything in a transaction
@@ -238,6 +158,7 @@ ownerRouter.post('/sessions', handleAsync(async (req: Request, res: Response) =>
         playerId,
         totalAmount,
         pointsEarned,
+        paidWithPoints: pointsToDeduct,
         isPaid: true,
         items: {
           create: sessionItems,
@@ -254,8 +175,9 @@ ownerRouter.post('/sessions', handleAsync(async (req: Request, res: Response) =>
     return s;
   });
 
-  res.status(201).json({ session, newTotalPoints, pointsEarned, pendingUpgrade });
+  res.status(201).json({ session, newTotalPoints, pointsEarned, pointsDeducted: pointsToDeduct, pendingUpgrade });
 }));
+
 
 ownerRouter.get('/sessions', handleAsync(async (req: Request, res: Response) => {
   const storeId = req.user!.storeId!;
@@ -293,54 +215,8 @@ ownerRouter.get('/sessions/:id', handleAsync(async (req: Request, res: Response)
   res.json(session);
 }));
 
-// ─────────────────────────────────────────────
-// QR PAYMENT GENERATION
-// ─────────────────────────────────────────────
 
-const generateQrSchema = z.object({
-  playerId: z.string().min(1),
-  pointsToDeduct: z.number().int().positive(),
-});
 
-ownerRouter.post('/qr-payment', handleAsync(async (req: Request, res: Response) => {
-  const { playerId, pointsToDeduct } = generateQrSchema.parse(req.body);
-  const storeId = req.user!.storeId!;
-
-  // Verify player has enough points
-  const playerLink = await prisma.playerStore.findUnique({
-    where: { playerId_storeId: { playerId, storeId } },
-  });
-  if (!playerLink) throw new AppError(404, 'Player not found in this store');
-  if (playerLink.totalPoints < pointsToDeduct) {
-    throw new AppError(400, `Player only has ${playerLink.totalPoints} points`);
-  }
-
-  // Expire any previous unused QR for this player/store
-  await prisma.qrPayment.updateMany({
-    where: { playerId, storeId, isUsed: false },
-    data: { isUsed: true },
-  });
-
-  const qrPayment = await prisma.qrPayment.create({
-    data: {
-      playerId,
-      storeId,
-      pointsToDeduct,
-      token: randomUUID(),
-      expiresAt: addMinutes(new Date(), 5),
-    },
-  });
-
-  res.status(201).json({ token: qrPayment.token, expiresAt: qrPayment.expiresAt, pointsToDeduct });
-}));
-
-// Poll status (owner side waiting for player to scan)
-ownerRouter.get('/qr-payment/:token/status', handleAsync(async (req: Request, res: Response) => {
-  const qr = await prisma.qrPayment.findUnique({ where: { token: String(req.params.token) } });
-  if (!qr) throw new AppError(404, 'QR token not found');
-  const expired = new Date() > qr.expiresAt && !qr.isUsed;
-  res.json({ isUsed: qr.isUsed, expired, expiresAt: qr.expiresAt });
-}));
 
 // ─────────────────────────────────────────────
 // TIER CONFIG
