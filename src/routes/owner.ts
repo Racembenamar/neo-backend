@@ -670,211 +670,151 @@ ownerRouter.post('/tournaments/:id/start', handleAsync(async (req: Request, res:
   const tournamentId = String(req.params.id);
   const storeId = req.user!.storeId!;
 
-  const result = await prisma.$transaction(async (tx) => {
-    const tournament = await tx.tournament.findUnique({
-      where: { id: tournamentId, storeId }
-    });
-    if (!tournament) throw new AppError(404, 'Tournament not found');
-    if (tournament.status === 'completed' || tournament.status === 'in_progress') {
-      throw new AppError(400, 'Tournament has already started or completed');
-    }
+  // ── 1. Read-only validation (no transaction needed) ──────────────────────
+  const tournament = await prisma.tournament.findUnique({
+    where: { id: tournamentId, storeId }
+  });
+  if (!tournament) throw new AppError(404, 'Tournament not found');
+  if (tournament.status === 'completed' || tournament.status === 'in_progress') {
+    throw new AppError(400, 'Tournament has already started or completed');
+  }
 
-    const acceptedParticipants = await tx.tournamentParticipant.findMany({
-      where: { tournamentId, status: 'accepted' },
-      orderBy: { registeredAt: 'asc' }
-    });
-
-    const playerCount = acceptedParticipants.length;
-    if (playerCount < tournament.maxPlayers) {
-      throw new AppError(400, `Need all ${tournament.maxPlayers} accepted players to start (currently ${playerCount})`);
-    }
-    if (playerCount < 2) {
-      throw new AppError(400, 'Need at least 2 accepted players to start');
-    }
-
-    // Update tournament status to in_progress
-    await tx.tournament.update({
-      where: { id: tournamentId },
-      data: { status: 'in_progress' }
-    });
-
-    const format = tournament.format || 'single_elimination';
-    const shuffled = [...acceptedParticipants].sort(() => Math.random() - 0.5);
-
-    if (format === 'single_elimination') {
-      // Calculate power of 2 bracket size
-      let bracketSize = 2;
-      while (bracketSize < playerCount) {
-        bracketSize *= 2;
-      }
-
-      const totalRounds = Math.log2(bracketSize);
-
-      // 1. Create all matches for all rounds as placeholders first
-      const createdMatches: any[] = [];
-      for (let r = 1; r <= totalRounds; r++) {
-        const matchCountInRound = bracketSize / Math.pow(2, r);
-        for (let idx = 0; idx < matchCountInRound; idx++) {
-          const m = await tx.match.create({
-            data: {
-              tournamentId,
-              round: r,
-              matchIndex: idx,
-              status: 'pending',
-            }
-          });
-          createdMatches.push(m);
-        }
-      }
-
-      // 2. Populate Round 1 matches with players
-      const round1Matches = createdMatches.filter(m => m.round === 1);
-      for (let idx = 0; idx < round1Matches.length; idx++) {
-        const match = round1Matches[idx];
-        const p1Idx = idx * 2;
-        const p2Idx = idx * 2 + 1;
-
-        const p1 = p1Idx < playerCount ? shuffled[p1Idx].playerId : null;
-        const p2 = p2Idx < playerCount ? shuffled[p2Idx].playerId : null;
-
-        let winnerId: string | null = null;
-        let status = 'pending';
-
-        if (p1 && !res.locals) { // checking condition safely
-          // placeholder
-        }
-
-        if (p1 && !p2) {
-          winnerId = p1;
-          status = 'completed';
-        } else if (!p1 && p2) {
-          winnerId = p2;
-          status = 'completed';
-        }
-
-        await tx.match.update({
-          where: { id: match.id },
-          data: {
-            player1Id: p1,
-            player2Id: p2,
-            winnerId,
-            status,
-            player1Score: winnerId === p1 && p1 ? 1 : 0,
-            player2Score: winnerId === p2 && p2 ? 1 : 0,
-          }
-        });
-
-        // If completed (bye), advance player to next round
-        if (status === 'completed' && winnerId) {
-          const nextRound = 2;
-          const nextIndex = Math.floor(idx / 2);
-          const isPlayer1ForNext = idx % 2 === 0;
-
-          const nextMatchPlaceholder = createdMatches.find(
-            m => m.round === nextRound && m.matchIndex === nextIndex
-          );
-
-          if (nextMatchPlaceholder) {
-            await tx.match.update({
-              where: { id: nextMatchPlaceholder.id },
-              data: isPlayer1ForNext
-                ? { player1Id: winnerId }
-                : { player2Id: winnerId }
-            });
-          }
-        }
-      }
-    } else {
-      // Group Formats (group_knockout or group_points)
-      const groupSize = tournament.groupSize || 4;
-      const groupCount = Math.floor(playerCount / groupSize);
-
-      // 1. Assign participants to groups and save to DB
-      for (let i = 0; i < shuffled.length; i++) {
-        const groupIdx = Math.floor(i / groupSize);
-        const groupName = String.fromCharCode(65 + groupIdx); // A, B, C, D...
-        await tx.tournamentParticipant.update({
-          where: {
-            tournamentId_playerId: {
-              tournamentId,
-              playerId: shuffled[i].playerId
-            }
-          },
-          data: { group: groupName }
-        });
-        // Update local object as well for subsequent usage
-        shuffled[i].group = groupName;
-      }
-
-      // 2. Generate matches per group
-      for (let g = 0; g < groupCount; g++) {
-        const groupName = String.fromCharCode(65 + g);
-        const groupPlayers = shuffled
-          .filter(p => p.group === groupName)
-          .map(p => p.playerId);
-
-        if (format === 'group_points') {
-          // Round-Robin
-          const rrMatches = getRoundRobinMatches(groupPlayers);
-          for (let idx = 0; idx < rrMatches.length; idx++) {
-            const rrm = rrMatches[idx];
-            await tx.match.create({
-              data: {
-                tournamentId,
-                round: rrm.round,
-                matchIndex: idx,
-                group: groupName,
-                player1Id: rrm.player1Id,
-                player2Id: rrm.player2Id,
-                status: 'pending',
-              }
-            });
-          }
-        } else if (format === 'group_knockout') {
-          // Mini bracket of size groupSize
-          const totalRounds = Math.log2(groupSize);
-          const createdGroupMatches: any[] = [];
-
-          for (let r = 1; r <= totalRounds; r++) {
-            const matchCountInRound = groupSize / Math.pow(2, r);
-            for (let idx = 0; idx < matchCountInRound; idx++) {
-              const m = await tx.match.create({
-                data: {
-                  tournamentId,
-                  round: r,
-                  matchIndex: idx,
-                  group: groupName,
-                  status: 'pending',
-                }
-              });
-              createdGroupMatches.push(m);
-            }
-          }
-
-          // Seed Round 1 of group mini-bracket
-          const round1Matches = createdGroupMatches.filter(m => m.round === 1);
-          for (let idx = 0; idx < round1Matches.length; idx++) {
-            const match = round1Matches[idx];
-            const p1 = groupPlayers[idx * 2];
-            const p2 = groupPlayers[idx * 2 + 1];
-
-            await tx.match.update({
-              where: { id: match.id },
-              data: {
-                player1Id: p1,
-                player2Id: p2,
-                status: 'pending',
-              }
-            });
-          }
-        }
-      }
-    }
-
-    return { success: true };
+  const acceptedParticipants = await prisma.tournamentParticipant.findMany({
+    where: { tournamentId, status: 'accepted' },
+    orderBy: { registeredAt: 'asc' }
   });
 
-  res.json(result);
+  const playerCount = acceptedParticipants.length;
+  if (playerCount < tournament.maxPlayers) {
+    throw new AppError(400, `Need all ${tournament.maxPlayers} accepted players to start (currently ${playerCount})`);
+  }
+  if (playerCount < 2) {
+    throw new AppError(400, 'Need at least 2 accepted players to start');
+  }
+
+  // ── 2. Build all match data in memory (CPU only, zero DB calls) ──────────
+  const format = tournament.format || 'single_elimination';
+  const shuffled = [...acceptedParticipants].sort(() => Math.random() - 0.5);
+  let matchesToCreate: any[] = [];
+  const participantGroupAssignments: { tournamentId: string; playerId: string; group: string }[] = [];
+
+  if (format === 'single_elimination') {
+    let bracketSize = 2;
+    while (bracketSize < playerCount) bracketSize *= 2;
+    const totalRounds = Math.log2(bracketSize);
+    const matchesMap: Record<string, any> = {};
+
+    for (let r = 1; r <= totalRounds; r++) {
+      const matchCountInRound = bracketSize / Math.pow(2, r);
+      for (let idx = 0; idx < matchCountInRound; idx++) {
+        matchesMap[`${r}_${idx}`] = {
+          tournamentId, round: r, matchIndex: idx, status: 'pending',
+          player1Id: null, player2Id: null, winnerId: null,
+          player1Score: 0, player2Score: 0,
+        };
+      }
+    }
+
+    const round1MatchCount = bracketSize / 2;
+    for (let idx = 0; idx < round1MatchCount; idx++) {
+      const match = matchesMap[`1_${idx}`];
+      const p1 = idx * 2 < playerCount ? shuffled[idx * 2].playerId : null;
+      const p2 = idx * 2 + 1 < playerCount ? shuffled[idx * 2 + 1].playerId : null;
+      match.player1Id = p1;
+      match.player2Id = p2;
+
+      const byePlayer = (p1 && !p2) ? p1 : (!p1 && p2) ? p2 : null;
+      if (byePlayer) {
+        match.winnerId = byePlayer;
+        match.status = 'completed';
+        match.player1Score = p1 ? 1 : 0;
+        match.player2Score = p2 ? 1 : 0;
+        const nextMatch = matchesMap[`2_${Math.floor(idx / 2)}`];
+        if (nextMatch) {
+          if (idx % 2 === 0) nextMatch.player1Id = byePlayer;
+          else nextMatch.player2Id = byePlayer;
+        }
+      }
+    }
+    matchesToCreate = Object.values(matchesMap);
+
+  } else {
+    // Group Formats
+    const groupSize = tournament.groupSize || 4;
+    const groupCount = Math.floor(playerCount / groupSize);
+
+    for (let i = 0; i < shuffled.length; i++) {
+      const groupName = String.fromCharCode(65 + Math.floor(i / groupSize));
+      (shuffled[i] as any).group = groupName;
+      participantGroupAssignments.push({ tournamentId, playerId: shuffled[i].playerId, group: groupName });
+    }
+
+    for (let g = 0; g < groupCount; g++) {
+      const groupName = String.fromCharCode(65 + g);
+      const groupPlayers = shuffled
+        .filter(p => (p as any).group === groupName)
+        .map(p => p.playerId);
+
+      if (format === 'group_points') {
+        const rrMatches = getRoundRobinMatches(groupPlayers);
+        rrMatches.forEach((rrm, idx) => {
+          matchesToCreate.push({
+            tournamentId, round: rrm.round, matchIndex: idx, group: groupName,
+            player1Id: rrm.player1Id, player2Id: rrm.player2Id, status: 'pending',
+          });
+        });
+      } else if (format === 'group_knockout') {
+        const totalRounds = Math.log2(groupSize);
+        const groupMatchesMap: Record<string, any> = {};
+        for (let r = 1; r <= totalRounds; r++) {
+          const matchCountInRound = groupSize / Math.pow(2, r);
+          for (let idx = 0; idx < matchCountInRound; idx++) {
+            groupMatchesMap[`${r}_${idx}`] = {
+              tournamentId, round: r, matchIndex: idx, group: groupName, status: 'pending',
+              player1Id: null, player2Id: null, winnerId: null, player1Score: 0, player2Score: 0,
+            };
+          }
+        }
+        const round1MatchCount = groupSize / 2;
+        for (let idx = 0; idx < round1MatchCount; idx++) {
+          const m = groupMatchesMap[`1_${idx}`];
+          m.player1Id = groupPlayers[idx * 2];
+          m.player2Id = groupPlayers[idx * 2 + 1];
+        }
+        matchesToCreate.push(...Object.values(groupMatchesMap));
+      }
+    }
+  }
+
+  // ── 3. Persist sequentially (no interactive transaction — PgBouncer safe) ─
+  // Mark tournament as in_progress
+  await prisma.tournament.update({
+    where: { id: tournamentId },
+    data: { status: 'in_progress' }
+  });
+
+  // Assign groups (group formats only)
+  if (participantGroupAssignments.length > 0) {
+    // Group assignments by group name for batched updateMany
+    const byGroup: Record<string, string[]> = {};
+    for (const a of participantGroupAssignments) {
+      if (!byGroup[a.group]) byGroup[a.group] = [];
+      byGroup[a.group].push(a.playerId);
+    }
+    for (const [groupName, playerIds] of Object.entries(byGroup)) {
+      await prisma.tournamentParticipant.updateMany({
+        where: { tournamentId, playerId: { in: playerIds } },
+        data: { group: groupName }
+      });
+    }
+  }
+
+  // Bulk insert all matches in one shot
+  if (matchesToCreate.length > 0) {
+    await prisma.match.createMany({ data: matchesToCreate });
+  }
+
+  res.json({ success: true });
 }));
 
 ownerRouter.get('/tournaments/:id/matches', handleAsync(async (req: Request, res: Response) => {
@@ -1048,274 +988,148 @@ ownerRouter.put('/tournaments/:id/matches/:matchId/score', handleAsync(async (re
 
   const winnerId = player1Score > player2Score ? match.player1Id : match.player2Id;
 
-  const result = await prisma.$transaction(async (tx) => {
-    const updatedMatch = await tx.match.update({
-      where: { id: matchId },
-      data: {
-        player1Score,
-        player2Score,
-        winnerId,
-        status: 'completed',
-      }
-    });
+  // ── 1. Update match score & mark completed ──────────────────────────────
+  const updatedMatch = await prisma.match.update({
+    where: { id: matchId },
+    data: { player1Score, player2Score, winnerId, status: 'completed' }
+  });
 
-    const allMatches = await tx.match.findMany({
-      where: { tournamentId }
-    });
+  // ── 2. Fetch all matches for progression logic ───────────────────────────
+  const allMatches = await prisma.match.findMany({ where: { tournamentId } });
 
-    if (match.group) {
-      // GROUP STAGE
-      const groupSize = tournament.groupSize || 4;
-      const format = tournament.format || 'group_points';
+  if (match.group) {
+    // GROUP STAGE
+    const groupSize = tournament.groupSize || 4;
+    const format = tournament.format || 'group_points';
 
-      if (format === 'group_knockout') {
-        const maxGroupRound = Math.log2(groupSize);
+    if (format === 'group_knockout') {
+      const maxGroupRound = Math.log2(groupSize);
 
-        if (match.round === maxGroupRound) {
-          // This group mini-bracket is completed!
-          // Check if all group stages are completed.
-          const pendingGroupMatches = allMatches.filter(
-            m => m.group !== null && m.status !== 'completed' && m.id !== matchId
-          );
-
-          if (pendingGroupMatches.length === 0) {
-            // Group Stage is completely done! Seed the knockout bracket.
-            const groupCount = tournament.maxPlayers / groupSize;
-            
-            // Collect the winner of each group
-            const groupWinners: string[] = [];
-            for (let g = 0; g < groupCount; g++) {
-              const groupName = String.fromCharCode(65 + g);
-              // Find the final match for this group
-              const finalMatch = allMatches.find(
-                m => m.group === groupName && m.round === maxGroupRound
-              );
-              const gWinnerId = finalMatch?.id === matchId ? winnerId : finalMatch?.winnerId;
-              if (gWinnerId) {
-                groupWinners.push(gWinnerId);
-              }
-            }
-
-            // Create knockout matches of size groupWinners.length (which is G)
-            const G = groupWinners.length;
-            const knockoutRounds = Math.log2(G);
-            const createdKnockoutMatches: any[] = [];
-
-            for (let r = 1; r <= knockoutRounds; r++) {
-              const matchCountInRound = G / Math.pow(2, r);
-              for (let idx = 0; idx < matchCountInRound; idx++) {
-                const m = await tx.match.create({
-                  data: {
-                    tournamentId,
-                    round: r,
-                    matchIndex: idx,
-                    group: null,
-                    status: 'pending',
-                  }
-                });
-                createdKnockoutMatches.push(m);
-              }
-            }
-
-            // Seed Round 1
-            const round1Matches = createdKnockoutMatches.filter(m => m.round === 1);
-            for (let idx = 0; idx < round1Matches.length; idx++) {
-              const m = round1Matches[idx];
-              const p1 = groupWinners[idx * 2];
-              const p2 = groupWinners[idx * 2 + 1];
-
-              await tx.match.update({
-                where: { id: m.id },
-                data: {
-                  player1Id: p1,
-                  player2Id: p2,
-                  status: 'pending',
-                }
-              });
-            }
-          }
-        } else {
-          // Advance inside group mini-bracket
-          const nextRound = match.round + 1;
-          const nextIndex = Math.floor(match.matchIndex / 2);
-          const isPlayer1ForNext = match.matchIndex % 2 === 0;
-
-          const nextMatch = await tx.match.findFirst({
-            where: { tournamentId, round: nextRound, matchIndex: nextIndex, group: match.group }
-          });
-
-          if (nextMatch) {
-            const updateData = isPlayer1ForNext
-              ? { player1Id: winnerId }
-              : { player2Id: winnerId };
-
-            await tx.match.update({
-              where: { id: nextMatch.id },
-              data: updateData
-            });
-          }
-        }
-      } else if (format === 'group_points') {
-        // Round-Robin
-        // Check if all group stage matches are completed
+      if (match.round === maxGroupRound) {
+        // This group's mini-bracket is done — check if ALL groups are done
         const pendingGroupMatches = allMatches.filter(
           m => m.group !== null && m.status !== 'completed' && m.id !== matchId
         );
 
         if (pendingGroupMatches.length === 0) {
-          // Group stage is completely finished! Compute standings and seed knockout
-          const standings = await computeStandingsInternal(tx, tournamentId);
+          // All groups done — build knockout bracket in memory
           const groupCount = tournament.maxPlayers / groupSize;
-          const advancingCount = tournament.advancingCount || 2;
+          const groupWinners: string[] = [];
+          for (let g = 0; g < groupCount; g++) {
+            const groupName = String.fromCharCode(65 + g);
+            const finalMatch = allMatches.find(
+              m => m.group === groupName && m.round === maxGroupRound
+            );
+            const gWinnerId = finalMatch?.id === matchId ? winnerId : finalMatch?.winnerId;
+            if (gWinnerId) groupWinners.push(gWinnerId);
+          }
 
-          if (advancingCount === 2) {
-            const G = groupCount;
-            const W = G * 2;
-            const knockoutRounds = Math.log2(W);
-            const createdKnockoutMatches: any[] = [];
-
-            // 1. Create all knockout matches
-            for (let r = 1; r <= knockoutRounds; r++) {
-              const matchCountInRound = W / Math.pow(2, r);
-              for (let idx = 0; idx < matchCountInRound; idx++) {
-                const m = await tx.match.create({
-                  data: {
-                    tournamentId,
-                    round: r,
-                    matchIndex: idx,
-                    group: null,
-                    status: 'pending',
-                  }
-                });
-                createdKnockoutMatches.push(m);
-              }
-            }
-
-            // 2. Seed Round 1
-            const round1Matches = createdKnockoutMatches.filter(m => m.round === 1);
-            for (let k = 0; k < G / 2; k++) {
-              const g1Name = String.fromCharCode(65 + k * 2);
-              const g2Name = String.fromCharCode(65 + k * 2 + 1);
-
-              const g1Standings = standings[g1Name] || [];
-              const g2Standings = standings[g2Name] || [];
-
-              const g1Winner = g1Standings[0]?.playerId || null;
-              const g1RunnerUp = g1Standings[1]?.playerId || null;
-              const g2Winner = g2Standings[0]?.playerId || null;
-              const g2RunnerUp = g2Standings[1]?.playerId || null;
-
-              const matchA = round1Matches.find(m => m.matchIndex === k * 2);
-              if (matchA) {
-                await tx.match.update({
-                  where: { id: matchA.id },
-                  data: {
-                    player1Id: g1Winner,
-                    player2Id: g2RunnerUp,
-                    status: 'pending',
-                  }
-                });
-              }
-
-              const matchB = round1Matches.find(m => m.matchIndex === k * 2 + 1);
-              if (matchB) {
-                await tx.match.update({
-                  where: { id: matchB.id },
-                  data: {
-                    player1Id: g2Winner,
-                    player2Id: g1RunnerUp,
-                    status: 'pending',
-                  }
-                });
-              }
-            }
-          } else {
-            // advancingCount === 1
-            const G = groupCount;
-            const W = G;
-            const knockoutRounds = Math.log2(W);
-            const createdKnockoutMatches: any[] = [];
-
-            // 1. Create all knockout matches
-            for (let r = 1; r <= knockoutRounds; r++) {
-              const matchCountInRound = W / Math.pow(2, r);
-              for (let idx = 0; idx < matchCountInRound; idx++) {
-                const m = await tx.match.create({
-                  data: {
-                    tournamentId,
-                    round: r,
-                    matchIndex: idx,
-                    group: null,
-                    status: 'pending',
-                  }
-                });
-                createdKnockoutMatches.push(m);
-              }
-            }
-
-            // 2. Seed Round 1
-            const round1Matches = createdKnockoutMatches.filter(m => m.round === 1);
-            for (let idx = 0; idx < G / 2; idx++) {
-              const g1Name = String.fromCharCode(65 + idx * 2);
-              const g2Name = String.fromCharCode(65 + idx * 2 + 1);
-
-              const g1Standings = standings[g1Name] || [];
-              const g2Standings = standings[g2Name] || [];
-
-              const g1Winner = g1Standings[0]?.playerId || null;
-              const g2Winner = g2Standings[0]?.playerId || null;
-
-              const m = round1Matches.find((x: any) => x.matchIndex === idx);
-              if (m) {
-                await tx.match.update({
-                  where: { id: m.id },
-                  data: {
-                    player1Id: g1Winner,
-                    player2Id: g2Winner,
-                    status: 'pending',
-                  }
-                });
-              }
+          const G = groupWinners.length;
+          const knockoutRounds = Math.log2(G);
+          const knockoutMatchesMap: Record<string, any> = {};
+          for (let r = 1; r <= knockoutRounds; r++) {
+            const matchCountInRound = G / Math.pow(2, r);
+            for (let idx = 0; idx < matchCountInRound; idx++) {
+              knockoutMatchesMap[`${r}_${idx}`] = {
+                tournamentId, round: r, matchIndex: idx, group: null, status: 'pending',
+                player1Id: null, player2Id: null, winnerId: null, player1Score: 0, player2Score: 0,
+              };
             }
           }
+          for (let idx = 0; idx < G / 2; idx++) {
+            const m = knockoutMatchesMap[`1_${idx}`];
+            if (m) { m.player1Id = groupWinners[idx * 2]; m.player2Id = groupWinners[idx * 2 + 1]; }
+          }
+          await prisma.match.createMany({ data: Object.values(knockoutMatchesMap) });
         }
-      }
-    } else {
-      // KNOCKOUT STAGE (group === null)
-      const knockoutMatches = allMatches.filter(m => m.group === null);
-      const maxRound = Math.max(...knockoutMatches.map(m => m.round));
-
-      if (match.round === maxRound) {
-        await tx.tournament.update({
-          where: { id: tournamentId },
-          data: { status: 'completed' }
-        });
       } else {
+        // Advance winner inside group mini-bracket
         const nextRound = match.round + 1;
         const nextIndex = Math.floor(match.matchIndex / 2);
-        const isPlayer1ForNext = match.matchIndex % 2 === 0;
-
-        const nextMatch = await tx.match.findFirst({
-          where: { tournamentId, round: nextRound, matchIndex: nextIndex, group: null }
+        const isP1 = match.matchIndex % 2 === 0;
+        const nextMatch = await prisma.match.findFirst({
+          where: { tournamentId, round: nextRound, matchIndex: nextIndex, group: match.group }
         });
-
         if (nextMatch) {
-          const updateData = isPlayer1ForNext
-            ? { player1Id: winnerId }
-            : { player2Id: winnerId };
-
-          await tx.match.update({
+          await prisma.match.update({
             where: { id: nextMatch.id },
-            data: updateData
+            data: isP1 ? { player1Id: winnerId } : { player2Id: winnerId }
           });
         }
       }
+    } else if (format === 'group_points') {
+      // Round-Robin — check if all group matches are done
+      const pendingGroupMatches = allMatches.filter(
+        m => m.group !== null && m.status !== 'completed' && m.id !== matchId
+      );
+
+      if (pendingGroupMatches.length === 0) {
+        // All group stage done — compute standings & seed knockout
+        const standings = await computeStandingsInternal(prisma, tournamentId);
+        const groupCount = tournament.maxPlayers / groupSize;
+        const advancingCount = tournament.advancingCount || 2;
+        const W = advancingCount === 2 ? groupCount * 2 : groupCount;
+        const knockoutRounds = Math.log2(W);
+        const knockoutMatchesMap: Record<string, any> = {};
+
+        for (let r = 1; r <= knockoutRounds; r++) {
+          const matchCountInRound = W / Math.pow(2, r);
+          for (let idx = 0; idx < matchCountInRound; idx++) {
+            knockoutMatchesMap[`${r}_${idx}`] = {
+              tournamentId, round: r, matchIndex: idx, group: null, status: 'pending',
+              player1Id: null, player2Id: null, winnerId: null, player1Score: 0, player2Score: 0,
+            };
+          }
+        }
+
+        if (advancingCount === 2) {
+          for (let k = 0; k < groupCount / 2; k++) {
+            const g1 = standings[String.fromCharCode(65 + k * 2)] || [];
+            const g2 = standings[String.fromCharCode(65 + k * 2 + 1)] || [];
+            const mA = knockoutMatchesMap[`1_${k * 2}`];
+            const mB = knockoutMatchesMap[`1_${k * 2 + 1}`];
+            if (mA) { mA.player1Id = g1[0]?.playerId || null; mA.player2Id = g2[1]?.playerId || null; }
+            if (mB) { mB.player1Id = g2[0]?.playerId || null; mB.player2Id = g1[1]?.playerId || null; }
+          }
+        } else {
+          for (let idx = 0; idx < groupCount / 2; idx++) {
+            const g1 = standings[String.fromCharCode(65 + idx * 2)] || [];
+            const g2 = standings[String.fromCharCode(65 + idx * 2 + 1)] || [];
+            const m = knockoutMatchesMap[`1_${idx}`];
+            if (m) { m.player1Id = g1[0]?.playerId || null; m.player2Id = g2[0]?.playerId || null; }
+          }
+        }
+
+        await prisma.match.createMany({ data: Object.values(knockoutMatchesMap) });
+      }
     }
+  } else {
+    // KNOCKOUT STAGE (group === null)
+    const knockoutMatches = allMatches.filter(m => m.group === null);
+    const maxRound = Math.max(...knockoutMatches.map(m => m.round));
 
-    return updatedMatch;
-  });
+    if (match.round === maxRound) {
+      await prisma.tournament.update({
+        where: { id: tournamentId },
+        data: { status: 'completed' }
+      });
+    } else {
+      const nextRound = match.round + 1;
+      const nextIndex = Math.floor(match.matchIndex / 2);
+      const isP1 = match.matchIndex % 2 === 0;
+      const nextMatch = await prisma.match.findFirst({
+        where: { tournamentId, round: nextRound, matchIndex: nextIndex, group: null }
+      });
+      if (nextMatch) {
+        await prisma.match.update({
+          where: { id: nextMatch.id },
+          data: isP1 ? { player1Id: winnerId } : { player2Id: winnerId }
+        });
+      }
+    }
+  }
 
-  res.json(result);
+  res.json(updatedMatch);
 }));
 
 ownerRouter.put('/tournaments/:id/matches/:matchId/status', handleAsync(async (req: Request, res: Response) => {
