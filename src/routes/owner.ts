@@ -1063,7 +1063,7 @@ ownerRouter.post('/notifications', handleAsync(async (req: Request, res: Respons
   const pushTokens = deviceTokens.map(dt => dt.token);
 
   // 3. Send using Expo (Dynamic import for ESM compatibility)
-  const { Expo } = await import('expo-server-sdk');
+  const { Expo } = await (Function('return import("expo-server-sdk")')()) as any;
   const expo = new Expo();
   const messages = [];
   for (const pushToken of pushTokens) {
