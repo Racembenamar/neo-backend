@@ -898,7 +898,9 @@ async function computeStandingsInternal(tx: any, tournamentId: string) {
       p2.scoresConceded += m.player1Score;
 
       if (m.winnerId === m.player1Id) {
-        p1.wins++;\n        p1.points += 3;\n        p2.losses++;
+        p1.wins++;
+        p1.points += 3;
+        p2.losses++;
       } else if (m.winnerId === m.player2Id) {
         p2.wins++;
         p2.points += 3;
