@@ -196,6 +196,9 @@ model Tournament {
   status           String   @default("open")
   isActive         Boolean  @default(true)
   imageUrl         String?
+  format           String   @default("single_elimination")
+  groupSize        Int?
+  advancingCount   Int?     @default(2)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
   participants     TournamentParticipant[]
@@ -210,6 +213,7 @@ model TournamentParticipant {
   player       Player     @relation(fields: [playerId], references: [id], onDelete: Cascade)
   playerId     String
   status       String     @default("pending") // pending, accepted, rejected
+  group        String?
   registeredAt DateTime   @default(now())
 
   @@id([tournamentId, playerId])
@@ -243,6 +247,7 @@ model Match {
   tournamentId  String
   round         Int
   matchIndex    Int
+  group         String?
   player1       Player?    @relation("Player1", fields: [player1Id], references: [id], onDelete: SetNull)
   player1Id     String?
   player2       Player?    @relation("Player2", fields: [player2Id], references: [id], onDelete: SetNull)

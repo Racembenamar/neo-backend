@@ -422,6 +422,125 @@ playerRouter.get('/tournaments/:id/matches', handleAsync(async (req: Request, re
   res.json(matches);
 }));
 
+async function computeStandingsInternal(tx: any, tournamentId: string) {
+  const participants = await tx.tournamentParticipant.findMany({
+    where: { tournamentId, status: 'accepted' },
+    include: {
+      player: {
+        select: {
+          id: true,
+          name: true,
+          username: true,
+          avatarUrl: true,
+        }
+      }
+    }
+  });
+
+  const matches = await tx.match.findMany({
+    where: { tournamentId, group: { not: null } }
+  });
+
+  const groups: Record<string, any[]> = {};
+
+  for (const p of participants) {
+    if (!p.group) continue;
+    if (!groups[p.group]) {
+      groups[p.group] = [];
+    }
+    groups[p.group].push({
+      playerId: p.playerId,
+      playerName: p.player.name || p.player.username,
+      avatarUrl: p.player.avatarUrl,
+      played: 0,
+      wins: 0,
+      losses: 0,
+      points: 0,
+      scoresWon: 0,
+      scoresConceded: 0,
+      scoreDiff: 0
+    });
+  }
+
+  for (const m of matches) {
+    if (m.status !== 'completed' || !m.group) continue;
+    const groupStandings = groups[m.group];
+    if (!groupStandings) continue;
+
+    const p1 = groupStandings.find(s => s.playerId === m.player1Id);
+    const p2 = groupStandings.find(s => s.playerId === m.player2Id);
+
+    if (p1 && p2) {
+      p1.played++;
+      p2.played++;
+      p1.scoresWon += m.player1Score;
+      p1.scoresConceded += m.player2Score;
+      p2.scoresWon += m.player2Score;
+      p2.scoresConceded += m.player1Score;
+
+      if (m.winnerId === m.player1Id) {
+        p1.wins++;
+        p1.points += 3;
+        p2.losses++;
+      } else if (m.winnerId === m.player2Id) {
+        p2.wins++;
+        p2.points += 3;
+        p1.losses++;
+      } else {
+        // Draw
+        p1.points += 1;
+        p2.points += 1;
+      }
+    }
+  }
+
+  for (const groupName of Object.keys(groups)) {
+    const standings = groups[groupName];
+    for (const s of standings) {
+      s.scoreDiff = s.scoresWon - s.scoresConceded;
+    }
+
+    standings.sort((a: any, b: any) => {
+      if (b.points !== a.points) {
+        return b.points - a.points;
+      }
+
+      const directMatch = matches.find(
+        (m: any) => (m.player1Id === a.playerId && m.player2Id === b.playerId) ||
+             (m.player1Id === b.playerId && m.player2Id === a.playerId)
+      );
+      if (directMatch && directMatch.status === 'completed' && directMatch.winnerId) {
+        if (directMatch.winnerId === a.playerId) return -1;
+        if (directMatch.winnerId === b.playerId) return 1;
+      }
+
+      if (b.scoreDiff !== a.scoreDiff) {
+        return b.scoreDiff - a.scoreDiff;
+      }
+
+      if (b.scoresWon !== a.scoresWon) {
+        return b.scoresWon - a.scoresWon;
+      }
+
+      return a.playerName.localeCompare(b.playerName);
+    });
+  }
+
+  return groups;
+}
+
+playerRouter.get('/tournaments/:id/standings', handleAsync(async (req: Request, res: Response) => {
+  const tournamentId = String(req.params.id);
+
+  const tournament = await prisma.tournament.findFirst({
+    where: { id: tournamentId, isActive: true }
+  });
+  if (!tournament) throw new AppError(404, 'Tournament not found or inactive');
+
+  const standings = await computeStandingsInternal(prisma, tournamentId);
+  res.json(standings);
+}));
+
 playerRouter.get('/tournaments/:id/participants', handleAsync(async (req: Request, res: Response) => {
   const tournamentId = String(req.params.id);
 
