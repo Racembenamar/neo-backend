@@ -409,6 +409,7 @@ const tournamentSchema = z.object({
   format: z.enum(['single_elimination', 'group_knockout', 'group_points']).optional(),
   groupSize: z.number().int().positive().nullable().optional(),
   advancingCount: z.number().int().positive().nullable().optional(),
+  schedulingRange: z.number().int().min(1).max(90).optional(),
 });
 
 ownerRouter.get('/tournaments', handleAsync(async (req: Request, res: Response) => {
@@ -1465,6 +1466,207 @@ ownerRouter.get('/notifications', handleAsync(async (req: Request, res: Response
     orderBy: { createdAt: 'desc' },
   });
   res.json(notifications);
+}));
+
+ownerRouter.put('/tournaments/:id/blocked-slots', handleAsync(async (req: Request, res: Response) => {
+  const tournamentId = String(req.params.id);
+  const storeId = req.user!.storeId!;
+  const { blockedSlots } = z.object({
+    blockedSlots: z.array(z.string())
+  }).parse(req.body);
+
+  const tournament = await prisma.tournament.findUnique({
+    where: { id: tournamentId }
+  });
+
+  if (!tournament) throw new AppError(404, 'Tournament not found');
+  if (tournament.storeId !== storeId) throw new AppError(403, 'Unauthorized');
+
+  const updated = await prisma.tournament.update({
+    where: { id: tournamentId },
+    data: {
+      blockedSlots: JSON.stringify(blockedSlots)
+    }
+  });
+
+  res.json(updated);
+}));
+
+ownerRouter.delete('/matches/:id/schedule', handleAsync(async (req: Request, res: Response) => {
+  const matchId = String(req.params.id);
+  const storeId = req.user!.storeId!;
+
+  const match = await prisma.match.findUnique({
+    where: { id: matchId },
+    include: {
+      tournament: true,
+      player1: true,
+      player2: true
+    }
+  });
+
+  if (!match) throw new AppError(404, 'Match not found');
+  if (match.tournament.storeId !== storeId) {
+    throw new AppError(403, 'You do not own the store hosting this tournament');
+  }
+  if (match.status === 'completed') {
+    throw new AppError(400, 'Cannot reset schedule of a completed match');
+  }
+
+  const updated = await prisma.match.update({
+    where: { id: matchId },
+    data: {
+      scheduledAt: null,
+      proposedAt: null,
+      proposedById: null,
+      scheduleStatus: 'unscheduled'
+    }
+  });
+
+  try {
+    const cancelTitle = '📢 Match Schedule Cancelled';
+    const cancelBody = `Store owner has reset your match schedule. Please coordinate a new date/time.`;
+
+    if (match.player1Id) {
+      await sendPushNotification(
+        match.player1Id,
+        cancelTitle,
+        cancelBody,
+        { type: 'referee_reset', matchId }
+      );
+    }
+    if (match.player2Id) {
+      await sendPushNotification(
+        match.player2Id,
+        cancelTitle,
+        cancelBody,
+        { type: 'referee_reset', matchId }
+      );
+    }
+  } catch (err) {
+    console.error('Error sending schedule cancel notification:', err);
+  }
+
+  res.json(updated);
+}));
+
+ownerRouter.get('/tournaments/:id/replacement-candidates', handleAsync(async (req: Request, res: Response) => {
+  const tournamentId = String(req.params.id);
+  const storeId = req.user!.storeId!;
+
+  const tournament = await prisma.tournament.findUnique({
+    where: { id: tournamentId, storeId }
+  });
+  if (!tournament) throw new AppError(404, 'Tournament not found');
+
+  const participants = await prisma.tournamentParticipant.findMany({
+    where: { tournamentId },
+    select: { playerId: true }
+  });
+  const participantIds = participants.map(p => p.playerId);
+
+  const candidates = await prisma.playerStore.findMany({
+    where: {
+      storeId,
+      playerId: { notIn: participantIds }
+    },
+    include: {
+      player: {
+        select: { id: true, name: true, username: true, avatarUrl: true, avatarSeed: true }
+      }
+    }
+  });
+
+  res.json(candidates.map(c => c.player));
+}));
+
+ownerRouter.put('/tournaments/:id/replace-player', handleAsync(async (req: Request, res: Response) => {
+  const tournamentId = String(req.params.id);
+  const storeId = req.user!.storeId!;
+  
+  const { playerId, replacementPlayerId } = z.object({
+    playerId: z.string().min(1),
+    replacementPlayerId: z.string().min(1)
+  }).parse(req.body);
+
+  const tournament = await prisma.tournament.findUnique({
+    where: { id: tournamentId, storeId }
+  });
+  if (!tournament) throw new AppError(404, 'Tournament not found');
+
+  const existingParticipant = await prisma.tournamentParticipant.findUnique({
+    where: { tournamentId_playerId: { tournamentId, playerId } }
+  });
+  if (!existingParticipant) {
+    throw new AppError(404, 'Player is not a participant in this tournament');
+  }
+
+  const isStoreMember = await prisma.playerStore.findUnique({
+    where: { playerId_storeId: { playerId: replacementPlayerId, storeId } }
+  });
+  if (!isStoreMember) {
+    throw new AppError(400, 'Replacement player is not registered in this store');
+  }
+
+  const isAlreadyParticipant = await prisma.tournamentParticipant.findUnique({
+    where: { tournamentId_playerId: { tournamentId, playerId: replacementPlayerId } }
+  });
+  if (isAlreadyParticipant) {
+    throw new AppError(400, 'Replacement player is already participating in this tournament');
+  }
+
+  await prisma.tournamentParticipant.delete({
+    where: { tournamentId_playerId: { tournamentId, playerId } }
+  });
+
+  await prisma.tournamentParticipant.create({
+    data: {
+      tournamentId,
+      playerId: replacementPlayerId,
+      status: 'accepted',
+      group: existingParticipant.group
+    }
+  });
+
+  await prisma.match.updateMany({
+    where: { tournamentId, player1Id: playerId },
+    data: { player1Id: replacementPlayerId }
+  });
+
+  await prisma.match.updateMany({
+    where: { tournamentId, player2Id: playerId },
+    data: { player2Id: replacementPlayerId }
+  });
+
+  await prisma.match.updateMany({
+    where: { tournamentId, winnerId: playerId },
+    data: { winnerId: replacementPlayerId }
+  });
+
+  await prisma.match.updateMany({
+    where: { tournamentId, proposedById: playerId },
+    data: { proposedById: replacementPlayerId }
+  });
+
+  try {
+    await sendPushNotification(
+      playerId,
+      '🏆 Replacement Announcement',
+      `You have been replaced in the tournament "${tournament.name}".`,
+      { type: 'tournament_replaced', tournamentId }
+    );
+
+    await sendPushNotification(
+      replacementPlayerId,
+      '🏆 Added to Tournament',
+      `You have been added as a player in "${tournament.name}"! Your matches are ready.`,
+      { type: 'tournament_added', tournamentId }
+    );
+  } catch (err) {
+    console.error('Error sending replacement notifications:', err);
+  }
+
+  res.json({ success: true });
 }));
 
 

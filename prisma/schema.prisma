@@ -199,6 +199,8 @@ model Tournament {
   format           String   @default("single_elimination")
   groupSize        Int?
   advancingCount   Int?     @default(2)
+  blockedSlots     String?
+  schedulingRange  Int      @default(7)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
   participants     TournamentParticipant[]

@@ -678,6 +678,14 @@ playerRouter.post('/matches/:id/propose', handleAsync(async (req: Request, res: 
     throw new AppError(400, 'This time slot is already booked by another match in the store');
   }
 
+  // Check if blocked by store owner
+  if (match.tournament.blockedSlots) {
+    const blockedSlots = JSON.parse(match.tournament.blockedSlots) as string[];
+    if (blockedSlots.includes(dateValue.toISOString())) {
+      throw new AppError(400, 'This time slot has been blocked by the store owner');
+    }
+  }
+
   // Update proposal
   const updated = await prisma.match.update({
     where: { id: matchId },
@@ -755,6 +763,14 @@ playerRouter.post('/matches/:id/accept', handleAsync(async (req: Request, res: R
 
   if (collision) {
     throw new AppError(400, 'This time slot was just booked by another match. Please propose another time.');
+  }
+
+  // Check if blocked by store owner
+  if (match.tournament.blockedSlots && match.proposedAt) {
+    const blockedSlots = JSON.parse(match.tournament.blockedSlots) as string[];
+    if (blockedSlots.includes(match.proposedAt.toISOString())) {
+      throw new AppError(400, 'This time slot was recently blocked by the store owner. Please propose another time.');
+    }
   }
 
   // Lock the slot
