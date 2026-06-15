@@ -631,7 +631,25 @@ playerRouter.get('/matches/:id', handleAsync(async (req: Request, res: Response)
     throw new AppError(403, 'You are not a participant in this match');
   }
 
-  res.json(match);
+  // Fetch all other confirmed matches' scheduled times in the same store
+  const confirmedStoreMatches = await prisma.match.findMany({
+    where: {
+      tournament: { storeId: match.tournament.storeId },
+      scheduleStatus: 'confirmed',
+      scheduledAt: { not: null },
+      id: { not: matchId }
+    },
+    select: {
+      scheduledAt: true
+    }
+  });
+
+  const bookedSlots = confirmedStoreMatches.map(m => m.scheduledAt!.toISOString());
+
+  res.json({
+    ...match,
+    bookedSlots
+  });
 }));
 
 // POST /api/player/matches/:id/propose - Propose a schedule slot
