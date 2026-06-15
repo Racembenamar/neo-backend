@@ -615,7 +615,7 @@ playerRouter.get('/matches/:id', handleAsync(async (req: Request, res: Response)
     include: {
       player1: { select: { id: true, username: true, name: true, avatarUrl: true, avatarSeed: true } },
       player2: { select: { id: true, username: true, name: true, avatarUrl: true, avatarSeed: true } },
-      tournament: { select: { id: true, name: true, format: true, storeId: true } },
+      tournament: { select: { id: true, name: true, format: true, storeId: true, blockedSlots: true, schedulingRange: true } },
       messages: {
         orderBy: { createdAt: 'asc' }
       }
