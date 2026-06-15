@@ -242,23 +242,39 @@ model Notification {
 }
 
 model Match {
-  id            String     @id @default(uuid())
-  tournament    Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
-  tournamentId  String
-  round         Int
-  matchIndex    Int
-  group         String?
-  player1       Player?    @relation("Player1", fields: [player1Id], references: [id], onDelete: SetNull)
-  player1Id     String?
-  player2       Player?    @relation("Player2", fields: [player2Id], references: [id], onDelete: SetNull)
-  player2Id     String?
-  player1Score  Int        @default(0)
-  player2Score  Int        @default(0)
-  winnerId      String?
-  tableNumber   String?
-  status        String     @default("pending") // pending, live, completed
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @updatedAt
+  id             String         @id @default(uuid())
+  tournament     Tournament     @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  tournamentId   String
+  round          Int
+  matchIndex     Int
+  group          String?
+  player1        Player?        @relation("Player1", fields: [player1Id], references: [id], onDelete: SetNull)
+  player1Id      String?
+  player2        Player?        @relation("Player2", fields: [player2Id], references: [id], onDelete: SetNull)
+  player2Id      String?
+  player1Score   Int            @default(0)
+  player2Score   Int            @default(0)
+  winnerId       String?
+  tableNumber    String?
+  status         String         @default("pending") // pending, live, completed
+  scheduledAt    DateTime?
+  proposedAt     DateTime?
+  proposedById   String?
+  scheduleStatus String         @default("unscheduled") // unscheduled, pending_approval, confirmed
+  messages       MatchMessage[]
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
 
   @@map("matches")
+}
+
+model MatchMessage {
+  id        String   @id @default(uuid())
+  match     Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  matchId   String
+  senderId  String
+  text      String
+  createdAt DateTime @default(now())
+
+  @@map("match_messages")
 }

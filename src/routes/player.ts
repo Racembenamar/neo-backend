@@ -4,6 +4,7 @@ import { prisma } from '../lib/prisma';
 import { requireAuth, requireRole } from '../middleware/auth';
 import { handleAsync, AppError } from '../middleware/errorHandler';
 import { z } from 'zod';
+import { sendPushNotification } from '../services/notification.service';
 
 export const playerRouter = Router();
 playerRouter.use(requireAuth, requireRole('player', 'owner'));
@@ -598,4 +599,239 @@ playerRouter.delete('/profile', handleAsync(async (req: Request, res: Response) 
   ]);
 
   res.json({ success: true });
+}));
+
+// ─────────────────────────────────────────────
+// MATCH SCHEDULING & CHAT ROOMS
+// ─────────────────────────────────────────────
+
+// GET /api/player/matches/:id - Fetch match room details
+playerRouter.get('/matches/:id', handleAsync(async (req: Request, res: Response) => {
+  const matchId = String(req.params.id);
+  const playerId = req.user!.id;
+
+  const match = await prisma.match.findUnique({
+    where: { id: matchId },
+    include: {
+      player1: { select: { id: true, username: true, name: true, avatarUrl: true, avatarSeed: true } },
+      player2: { select: { id: true, username: true, name: true, avatarUrl: true, avatarSeed: true } },
+      tournament: { select: { id: true, name: true, format: true, storeId: true } },
+      messages: {
+        orderBy: { createdAt: 'asc' }
+      }
+    }
+  });
+
+  if (!match) throw new AppError(404, 'Match not found');
+
+  // Verify player is part of the match
+  if (match.player1Id !== playerId && match.player2Id !== playerId) {
+    throw new AppError(403, 'You are not a participant in this match');
+  }
+
+  res.json(match);
+}));
+
+// POST /api/player/matches/:id/propose - Propose a schedule slot
+playerRouter.post('/matches/:id/propose', handleAsync(async (req: Request, res: Response) => {
+  const matchId = String(req.params.id);
+  const playerId = req.user!.id;
+  const { proposedAt } = z.object({
+    proposedAt: z.string()
+  }).parse(req.body);
+
+  const match = await prisma.match.findUnique({
+    where: { id: matchId },
+    include: {
+      player1: true,
+      player2: true,
+      tournament: true
+    }
+  });
+
+  if (!match) throw new AppError(404, 'Match not found');
+  if (match.player1Id !== playerId && match.player2Id !== playerId) {
+    throw new AppError(403, 'You are not a participant in this match');
+  }
+  if (match.status === 'completed') {
+    throw new AppError(400, 'Cannot schedule a completed match');
+  }
+
+  const dateValue = new Date(proposedAt);
+  if (isNaN(dateValue.getTime())) {
+    throw new AppError(400, 'Invalid proposal date/time');
+  }
+
+  // Collision check: Ensure no other match in the same store is confirmed for the exact same time
+  const collision = await prisma.match.findFirst({
+    where: {
+      tournament: { storeId: match.tournament.storeId },
+      scheduledAt: dateValue,
+      scheduleStatus: 'confirmed',
+      id: { not: matchId }
+    }
+  });
+
+  if (collision) {
+    throw new AppError(400, 'This time slot is already booked by another match in the store');
+  }
+
+  // Update proposal
+  const updated = await prisma.match.update({
+    where: { id: matchId },
+    data: {
+      proposedAt: dateValue,
+      proposedById: playerId,
+      scheduleStatus: 'pending_approval'
+    },
+    include: {
+      player1: { select: { id: true, name: true } },
+      player2: { select: { id: true, name: true } }
+    }
+  });
+
+  // Send push notification to opponent
+  const opponentId = match.player1Id === playerId ? match.player2Id : match.player1Id;
+  if (opponentId) {
+    const senderName = match.player1Id === playerId ? match.player1?.name : match.player2?.name;
+    const formattedDate = dateValue.toLocaleString('fr-FR', {
+      weekday: 'long',
+      day: 'numeric',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+    await sendPushNotification(
+      opponentId,
+      '⚔️ New Match Proposal',
+      `@${senderName || 'Your opponent'} proposed a schedule: ${formattedDate}. Tap to accept or propose alternative.`,
+      { type: 'match_proposal', matchId }
+    );
+  }
+
+  res.json(updated);
+}));
+
+// POST /api/player/matches/:id/accept - Accept the proposed schedule slot
+playerRouter.post('/matches/:id/accept', handleAsync(async (req: Request, res: Response) => {
+  const matchId = String(req.params.id);
+  const playerId = req.user!.id;
+
+  const match = await prisma.match.findUnique({
+    where: { id: matchId },
+    include: {
+      player1: true,
+      player2: true,
+      tournament: true
+    }
+  });
+
+  if (!match) throw new AppError(404, 'Match not found');
+  if (match.player1Id !== playerId && match.player2Id !== playerId) {
+    throw new AppError(403, 'You are not a participant in this match');
+  }
+  if (match.scheduleStatus !== 'pending_approval' || !match.proposedAt) {
+    throw new AppError(400, 'No pending schedule proposal to accept');
+  }
+  if (match.proposedById === playerId) {
+    throw new AppError(400, 'You cannot accept your own proposal');
+  }
+
+  // Collision check one last time before locking
+  const collision = await prisma.match.findFirst({
+    where: {
+      tournament: { storeId: match.tournament.storeId },
+      scheduledAt: match.proposedAt,
+      scheduleStatus: 'confirmed',
+      id: { not: matchId }
+    }
+  });
+
+  if (collision) {
+    throw new AppError(400, 'This time slot was just booked by another match. Please propose another time.');
+  }
+
+  // Lock the slot
+  const updated = await prisma.match.update({
+    where: { id: matchId },
+    data: {
+      scheduledAt: match.proposedAt,
+      proposedAt: null,
+      proposedById: null,
+      scheduleStatus: 'confirmed'
+    },
+    include: {
+      player1: { select: { id: true, name: true } },
+      player2: { select: { id: true, name: true } }
+    }
+  });
+
+  // Notify both players
+  const opponentId = match.player1Id === playerId ? match.player2Id : match.player1Id;
+  const formattedDate = updated.scheduledAt!.toLocaleString('fr-FR', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+
+  if (opponentId) {
+    await sendPushNotification(
+      opponentId,
+      '📅 Match Confirmed!',
+      `Your match is locked for: ${formattedDate}. Ready up!`,
+      { type: 'match_confirmed', matchId }
+    );
+  }
+  await sendPushNotification(
+    playerId,
+    '📅 Match Confirmed!',
+    `Your match is locked for: ${formattedDate}. Ready up!`,
+    { type: 'match_confirmed', matchId }
+  );
+
+  res.json(updated);
+}));
+
+// POST /api/player/matches/:id/chat - Send a chat message to opponent
+playerRouter.post('/matches/:id/chat', handleAsync(async (req: Request, res: Response) => {
+  const matchId = String(req.params.id);
+  const playerId = req.user!.id;
+  const { text } = z.object({
+    text: z.string().min(1)
+  }).parse(req.body);
+
+  const match = await prisma.match.findUnique({
+    where: { id: matchId },
+    include: { player1: true, player2: true }
+  });
+
+  if (!match) throw new AppError(404, 'Match not found');
+  if (match.player1Id !== playerId && match.player2Id !== playerId) {
+    throw new AppError(403, 'You are not a participant in this match');
+  }
+
+  // Create message
+  const msg = await prisma.matchMessage.create({
+    data: {
+      matchId,
+      senderId: playerId,
+      text
+    }
+  });
+
+  // Send push notification to opponent
+  const opponentId = match.player1Id === playerId ? match.player2Id : match.player1Id;
+  if (opponentId) {
+    const senderName = match.player1Id === playerId ? match.player1?.name : match.player2?.name;
+    await sendPushNotification(
+      opponentId,
+      `💬 Message from @${senderName || 'Opponent'}`,
+      text.length > 50 ? `${text.slice(0, 50)}...` : text,
+      { type: 'match_message', matchId }
+    );
+  }
+
+  res.status(201).json(msg);
 }));

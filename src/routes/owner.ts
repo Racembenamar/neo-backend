@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { Expo } from 'expo-server-sdk';
 import bcrypt from 'bcryptjs';
+import { sendPushNotification, sendPushNotificationToMultiple } from '../services/notification.service';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { addMinutes } from 'date-fns';
@@ -428,13 +429,70 @@ ownerRouter.get('/tournaments', handleAsync(async (req: Request, res: Response) 
 
 ownerRouter.post('/tournaments', handleAsync(async (req: Request, res: Response) => {
   const data = tournamentSchema.parse(req.body);
+  const storeId = req.user!.storeId!;
+
   const tournament = await prisma.tournament.create({
     data: {
       ...data,
       date: new Date(data.date),
-      storeId: req.user!.storeId!,
+      storeId,
     },
   });
+
+  // Draft dynamic themed announcement
+  const store = await prisma.store.findUnique({ where: { id: storeId } });
+  
+  let title = `🏆 New Tournament in ${store?.name || 'NEO'}`;
+  let body = `Join the new tournament: ${tournament.name}! Prize Pool: ${tournament.prizePool}.`;
+
+  const cleanDate = new Date(tournament.date).toLocaleString('fr-FR', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+
+  const entryText = tournament.entryPrice && tournament.entryPrice.toLowerCase() !== 'gratuit'
+    ? `Entry: ${tournament.entryPrice}`
+    : 'Entry: FREE';
+
+  const limitText = tournament.maxPlayers > 0 ? `Only ${tournament.maxPlayers} slots available!` : '';
+
+  if (tournament.format === 'single_elimination') {
+    title = `⚔️ SUDDEN DEATH: ${tournament.name}`;
+    body = `New Single Elimination tournament at ${store?.name || 'NEO'}! Lose once and you are out. Prize: ${tournament.prizePool}. ${entryText}. ${limitText} Starts ${cleanDate}!`;
+  } else if (tournament.format === 'group_knockout') {
+    title = `🔥 SURVIVE GROUPS: ${tournament.name}`;
+    body = `New Group Knockout tournament at ${store?.name || 'NEO'}! Face your group, qualify for the finals. Prize: ${tournament.prizePool}. ${entryText}. ${limitText} Starts ${cleanDate}!`;
+  } else if (tournament.format === 'group_points') {
+    title = `📈 LEADERBOARD RUN: ${tournament.name}`;
+    body = `New Group Points tournament at ${store?.name || 'NEO'}! Every match scores points, climb the standings. Prize: ${tournament.prizePool}. ${entryText}. ${limitText} Starts ${cleanDate}!`;
+  }
+
+  // Save to notifications history
+  await prisma.notification.create({
+    data: {
+      storeId,
+      title,
+      body,
+    }
+  });
+
+  // Fetch all players for this store
+  const playerLinks = await prisma.playerStore.findMany({
+    where: { storeId },
+    select: { playerId: true }
+  });
+  const playerIds = playerLinks.map(l => l.playerId);
+
+  if (playerIds.length > 0) {
+    await sendPushNotificationToMultiple(playerIds, title, body, {
+      type: 'tournament_created',
+      tournamentId: tournament.id
+    });
+  }
+
   res.status(201).json(tournament);
 }));
 
@@ -695,6 +753,40 @@ ownerRouter.post('/tournaments/:id/start', handleAsync(async (req: Request, res:
   // Bulk insert all matches in one shot
   if (matchesToCreate.length > 0) {
     await prisma.match.createMany({ data: matchesToCreate });
+
+    // Send notifications to round 1 players in background
+    try {
+      const round1Matches = await prisma.match.findMany({
+        where: { tournamentId, round: 1 },
+        include: {
+          player1: { select: { id: true, name: true } },
+          player2: { select: { id: true, name: true } }
+        }
+      });
+
+      for (const match of round1Matches) {
+        if (match.player1Id && match.player2Id) {
+          const p1Name = match.player1?.name || 'Opponent';
+          const p2Name = match.player2?.name || 'Opponent';
+
+          await sendPushNotification(
+            match.player1Id,
+            '🎮 Match Ready - Round 1',
+            `Your match against @${p2Name} is ready! Tap to coordinate the date/time or play.`,
+            { type: 'match_ready', matchId: match.id }
+          );
+
+          await sendPushNotification(
+            match.player2Id,
+            '🎮 Match Ready - Round 1',
+            `Your match against @${p1Name} is ready! Tap to coordinate the date/time or play.`,
+            { type: 'match_ready', matchId: match.id }
+          );
+        }
+      }
+    } catch (err) {
+      console.error('Error sending round 1 notifications:', err);
+    }
   }
 
   res.json({ success: true });
@@ -856,7 +948,11 @@ ownerRouter.put('/tournaments/:id/matches/:matchId/score', handleAsync(async (re
   if (!tournament) throw new AppError(404, 'Tournament not found');
 
   const match = await prisma.match.findUnique({
-    where: { id: matchId, tournamentId }
+    where: { id: matchId, tournamentId },
+    include: {
+      player1: { select: { id: true, name: true } },
+      player2: { select: { id: true, name: true } }
+    }
   });
   if (!match) throw new AppError(404, 'Match not found');
   if (match.status === 'completed') {
@@ -873,6 +969,32 @@ ownerRouter.put('/tournaments/:id/matches/:matchId/score', handleAsync(async (re
     where: { id: matchId },
     data: { player1Score, player2Score, winnerId, status: 'completed' }
   });
+
+  // Send notifications for match completed
+  try {
+    const p1Name = match.player1?.name || 'Player 1';
+    const p2Name = match.player2?.name || 'Player 2';
+    const matchCompletedTitle = '🎯 Match Result Registered';
+    const matchCompletedBody = `${p1Name} vs ${p2Name} finished with score: ${player1Score} - ${player2Score}.`;
+    if (match.player1Id) {
+      await sendPushNotification(
+        match.player1Id,
+        matchCompletedTitle,
+        matchCompletedBody,
+        { type: 'match_completed', matchId }
+      );
+    }
+    if (match.player2Id) {
+      await sendPushNotification(
+        match.player2Id,
+        matchCompletedTitle,
+        matchCompletedBody,
+        { type: 'match_completed', matchId }
+      );
+    }
+  } catch (err) {
+    console.error('Error sending match score notifications:', err);
+  }
 
   // ── 2. Fetch all matches for progression logic ───────────────────────────
   const allMatches = await prisma.match.findMany({ where: { tournamentId } });
@@ -921,6 +1043,37 @@ ownerRouter.put('/tournaments/:id/matches/:matchId/score', handleAsync(async (re
             if (m) { m.player1Id = groupWinners[idx * 2]; m.player2Id = groupWinners[idx * 2 + 1]; }
           }
           await prisma.match.createMany({ data: Object.values(knockoutMatchesMap) });
+
+          // Send group stage finish / knockout round ready alerts
+          try {
+            const r1Matches = await prisma.match.findMany({
+              where: { tournamentId, round: 1, group: null },
+              include: {
+                player1: { select: { id: true, name: true } },
+                player2: { select: { id: true, name: true } }
+              }
+            });
+            for (const rm of r1Matches) {
+              if (rm.player1Id && rm.player2Id) {
+                const p1 = rm.player1?.name || 'Opponent';
+                const p2 = rm.player2?.name || 'Opponent';
+                await sendPushNotification(
+                  rm.player1Id,
+                  '🎮 Knockout Match Ready!',
+                  `You advanced to the knockout stage! Your match against @${p2} is ready.`,
+                  { type: 'match_ready', matchId: rm.id }
+                );
+                await sendPushNotification(
+                  rm.player2Id,
+                  '🎮 Knockout Match Ready!',
+                  `You advanced to the knockout stage! Your match against @${p1} is ready.`,
+                  { type: 'match_ready', matchId: rm.id }
+                );
+              }
+            }
+          } catch (err) {
+            console.error('Error sending knockout stage notifications:', err);
+          }
         }
       } else {
         // Advance winner inside group mini-bracket
@@ -931,10 +1084,35 @@ ownerRouter.put('/tournaments/:id/matches/:matchId/score', handleAsync(async (re
           where: { tournamentId, round: nextRound, matchIndex: nextIndex, group: match.group }
         });
         if (nextMatch) {
-          await prisma.match.update({
+          const updatedNext = await prisma.match.update({
             where: { id: nextMatch.id },
-            data: isP1 ? { player1Id: winnerId } : { player2Id: winnerId }
+            data: isP1 ? { player1Id: winnerId } : { player2Id: winnerId },
+            include: {
+              player1: { select: { id: true, name: true } },
+              player2: { select: { id: true, name: true } }
+            }
           });
+
+          if (updatedNext.player1Id && updatedNext.player2Id) {
+            try {
+              const p1Name = updatedNext.player1?.name || 'Opponent';
+              const p2Name = updatedNext.player2?.name || 'Opponent';
+              await sendPushNotification(
+                updatedNext.player1Id,
+                `🎮 Match Ready - Round ${updatedNext.round}`,
+                `Your next round match against @${p2Name} is ready! Tap to coordinate the date/time.`,
+                { type: 'match_ready', matchId: updatedNext.id }
+              );
+              await sendPushNotification(
+                updatedNext.player2Id,
+                `🎮 Match Ready - Round ${updatedNext.round}`,
+                `Your next round match against @${p1Name} is ready! Tap to coordinate the date/time.`,
+                { type: 'match_ready', matchId: updatedNext.id }
+              );
+            } catch (err) {
+              console.error('Error sending next round notifications:', err);
+            }
+          }
         }
       }
     } else if (format === 'group_points') {
@@ -981,6 +1159,37 @@ ownerRouter.put('/tournaments/:id/matches/:matchId/score', handleAsync(async (re
         }
 
         await prisma.match.createMany({ data: Object.values(knockoutMatchesMap) });
+
+        // Send group stage finish / knockout round ready alerts
+        try {
+          const r1Matches = await prisma.match.findMany({
+            where: { tournamentId, round: 1, group: null },
+            include: {
+              player1: { select: { id: true, name: true } },
+              player2: { select: { id: true, name: true } }
+            }
+          });
+          for (const rm of r1Matches) {
+            if (rm.player1Id && rm.player2Id) {
+              const p1 = rm.player1?.name || 'Opponent';
+              const p2 = rm.player2?.name || 'Opponent';
+              await sendPushNotification(
+                rm.player1Id,
+                '🎮 Knockout Match Ready!',
+                `You advanced to the knockout stage! Your match against @${p2} is ready.`,
+                { type: 'match_ready', matchId: rm.id }
+              );
+              await sendPushNotification(
+                rm.player2Id,
+                '🎮 Knockout Match Ready!',
+                `You advanced to the knockout stage! Your match against @${p1} is ready.`,
+                { type: 'match_ready', matchId: rm.id }
+              );
+            }
+          }
+        } catch (err) {
+          console.error('Error sending knockout stage notifications:', err);
+        }
       }
     }
   } else {
@@ -993,6 +1202,37 @@ ownerRouter.put('/tournaments/:id/matches/:matchId/score', handleAsync(async (re
         where: { id: tournamentId },
         data: { status: 'completed' }
       });
+
+      // Send Tournament Completed alert
+      try {
+        const championName = winnerId === match.player1Id ? (match.player1?.name || 'Player 1') : (match.player2?.name || 'Player 2');
+        const completedTitle = `🏆 Tournament Completed!`;
+        const completedBody = `Congratulations to @${championName} for winning the tournament "${tournament.name}"!`;
+        
+        // Save notification to history
+        await prisma.notification.create({
+          data: {
+            storeId,
+            title: completedTitle,
+            body: completedBody,
+          }
+        });
+
+        // Broadcast to all store players
+        const playerLinks = await prisma.playerStore.findMany({
+          where: { storeId },
+          select: { playerId: true }
+        });
+        const playerIds = playerLinks.map(l => l.playerId);
+        if (playerIds.length > 0) {
+          await sendPushNotificationToMultiple(playerIds, completedTitle, completedBody, {
+            type: 'tournament_completed',
+            tournamentId
+          });
+        }
+      } catch (err) {
+        console.error('Error sending tournament completed notification:', err);
+      }
     } else {
       const nextRound = match.round + 1;
       const nextIndex = Math.floor(match.matchIndex / 2);
@@ -1001,10 +1241,35 @@ ownerRouter.put('/tournaments/:id/matches/:matchId/score', handleAsync(async (re
         where: { tournamentId, round: nextRound, matchIndex: nextIndex, group: null }
       });
       if (nextMatch) {
-        await prisma.match.update({
+        const updatedNext = await prisma.match.update({
           where: { id: nextMatch.id },
-          data: isP1 ? { player1Id: winnerId } : { player2Id: winnerId }
+          data: isP1 ? { player1Id: winnerId } : { player2Id: winnerId },
+          include: {
+            player1: { select: { id: true, name: true } },
+            player2: { select: { id: true, name: true } }
+          }
         });
+
+        if (updatedNext.player1Id && updatedNext.player2Id) {
+          try {
+            const p1Name = updatedNext.player1?.name || 'Opponent';
+            const p2Name = updatedNext.player2?.name || 'Opponent';
+            await sendPushNotification(
+              updatedNext.player1Id,
+              `🎮 Match Ready - Round ${updatedNext.round}`,
+              `Your next round match against @${p2Name} is ready! Tap to coordinate the date/time.`,
+              { type: 'match_ready', matchId: updatedNext.id }
+            );
+            await sendPushNotification(
+              updatedNext.player2Id,
+              `🎮 Match Ready - Round ${updatedNext.round}`,
+              `Your next round match against @${p1Name} is ready! Tap to coordinate the date/time.`,
+              { type: 'match_ready', matchId: updatedNext.id }
+            );
+          } catch (err) {
+            console.error('Error sending next round notifications:', err);
+          }
+        }
       }
     }
   }
@@ -1032,6 +1297,97 @@ ownerRouter.put('/tournaments/:id/matches/:matchId/status', handleAsync(async (r
   });
   res.json(updated);
 }));
+
+ownerRouter.put('/matches/:id/schedule', handleAsync(async (req: Request, res: Response) => {
+  const matchId = String(req.params.id);
+  const storeId = req.user!.storeId!;
+  const { scheduledAt } = z.object({
+    scheduledAt: z.string()
+  }).parse(req.body);
+
+  const dateValue = new Date(scheduledAt);
+  if (isNaN(dateValue.getTime())) {
+    throw new AppError(400, 'Invalid date/time format');
+  }
+
+  // Find match & ensure it belongs to this store's tournament
+  const match = await prisma.match.findUnique({
+    where: { id: matchId },
+    include: {
+      tournament: true,
+      player1: true,
+      player2: true
+    }
+  });
+
+  if (!match) throw new AppError(404, 'Match not found');
+  if (match.tournament.storeId !== storeId) {
+    throw new AppError(403, 'You do not own the store hosting this tournament');
+  }
+  if (match.status === 'completed') {
+    throw new AppError(400, 'Cannot schedule a completed match');
+  }
+
+  // Check collision for this store
+  const collision = await prisma.match.findFirst({
+    where: {
+      tournament: { storeId },
+      scheduledAt: dateValue,
+      scheduleStatus: 'confirmed',
+      id: { not: matchId }
+    }
+  });
+
+  if (collision) {
+    throw new AppError(400, 'This time slot is already booked by another match in your store');
+  }
+
+  const updated = await prisma.match.update({
+    where: { id: matchId },
+    data: {
+      scheduledAt: dateValue,
+      proposedAt: null,
+      proposedById: null,
+      scheduleStatus: 'confirmed'
+    }
+  });
+
+  // Notify players of referee override
+  try {
+    const formattedDate = dateValue.toLocaleString('fr-FR', {
+      weekday: 'long',
+      day: 'numeric',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+
+    const overrideTitle = '📢 Referee Schedule Locked';
+    const overrideBody = `Store owner locked your match for: ${formattedDate}. Check details.`;
+
+    if (match.player1Id) {
+      await sendPushNotification(
+        match.player1Id,
+        overrideTitle,
+        overrideBody,
+        { type: 'referee_override', matchId }
+      );
+    }
+    if (match.player2Id) {
+      await sendPushNotification(
+        match.player2Id,
+        overrideTitle,
+        overrideBody,
+        { type: 'referee_override', matchId }
+      );
+    }
+  } catch (err) {
+    console.error('Error sending referee override notification:', err);
+  }
+
+  res.json(updated);
+}));
+
 
 // ─────────────────────────────────────────────
 // NOTIFICATIONS
