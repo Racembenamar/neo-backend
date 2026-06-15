@@ -724,7 +724,11 @@ playerRouter.post('/matches/:id/accept', handleAsync(async (req: Request, res: R
     include: {
       player1: true,
       player2: true,
-      tournament: true
+      tournament: {
+        include: {
+          store: true
+        }
+      }
     }
   });
 
@@ -768,7 +772,7 @@ playerRouter.post('/matches/:id/accept', handleAsync(async (req: Request, res: R
     }
   });
 
-  // Notify both players
+  // Notify both players & store owner
   const opponentId = match.player1Id === playerId ? match.player2Id : match.player1Id;
   const formattedDate = updated.scheduledAt!.toLocaleString('fr-FR', {
     weekday: 'long',
@@ -792,6 +796,18 @@ playerRouter.post('/matches/:id/accept', handleAsync(async (req: Request, res: R
     `Your match is locked for: ${formattedDate}. Ready up!`,
     { type: 'match_confirmed', matchId }
   );
+
+  const storeOwnerId = match.tournament.store.ownerId;
+  if (storeOwnerId) {
+    const p1Name = updated.player1?.name || match.player1?.name || 'TBD';
+    const p2Name = updated.player2?.name || match.player2?.name || 'TBD';
+    await sendPushNotification(
+      storeOwnerId,
+      '📅 Match Planifié',
+      `Le match ${p1Name} vs ${p2Name} est planifié pour : ${formattedDate}.`,
+      { type: 'match_confirmed', matchId }
+    );
+  }
 
   res.json(updated);
 }));
