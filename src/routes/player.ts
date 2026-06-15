@@ -624,8 +624,10 @@ playerRouter.get('/matches/:id', handleAsync(async (req: Request, res: Response)
 
   if (!match) throw new AppError(404, 'Match not found');
 
-  // Verify player is part of the match
-  if (match.player1Id !== playerId && match.player2Id !== playerId) {
+  // Verify player is part of the match or is owner/admin
+  const isParticipant = match.player1Id === playerId || match.player2Id === playerId;
+  const isOwnerOrAdmin = req.user!.role === 'owner' || req.user!.role === 'admin';
+  if (!isParticipant && !isOwnerOrAdmin) {
     throw new AppError(403, 'You are not a participant in this match');
   }
 
