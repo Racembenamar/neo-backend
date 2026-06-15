@@ -67,15 +67,21 @@ ownerRouter.get('/scan-player/:playerId', handleAsync(async (req: Request, res: 
   const storeId = req.user!.storeId!;
   const playerId = String(req.params.playerId);
 
-  const player = await prisma.player.findUnique({
-    where: { id: playerId },
+  const player = await prisma.player.findFirst({
+    where: {
+      OR: [
+        { id: playerId },
+        { username: { equals: playerId, mode: 'insensitive' } },
+        { phone: playerId },
+      ],
+    },
     select: { id: true, username: true, name: true, phone: true },
   });
   if (!player) throw new AppError(404, 'Player not found');
 
   // Get store-specific points/tier — may not exist yet (first visit)
   const link = await prisma.playerStore.findUnique({
-    where: { playerId_storeId: { playerId, storeId } },
+    where: { playerId_storeId: { playerId: player.id, storeId } },
   });
 
   res.json({
