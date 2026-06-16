@@ -860,7 +860,7 @@ playerRouter.post('/matches/:id/propose', handleAsync(async (req: Request, res: 
   const opponentId = match.player1Id === playerId ? match.player2Id : match.player1Id;
   if (opponentId) {
     const senderName = match.player1Id === playerId ? match.player1?.name : match.player2?.name;
-    const formattedDate = dateValue.toLocaleString('fr-FR', {
+    const formattedDate = dateValue.toLocaleString('en-US', {
       weekday: 'long',
       day: 'numeric',
       month: 'short',
@@ -946,7 +946,7 @@ playerRouter.post('/matches/:id/accept', handleAsync(async (req: Request, res: R
 
   // Notify both players & store owner
   const opponentId = match.player1Id === playerId ? match.player2Id : match.player1Id;
-  const formattedDate = updated.scheduledAt!.toLocaleString('fr-FR', {
+  const formattedDate = updated.scheduledAt!.toLocaleString('en-US', {
     weekday: 'long',
     day: 'numeric',
     month: 'short',
@@ -975,8 +975,8 @@ playerRouter.post('/matches/:id/accept', handleAsync(async (req: Request, res: R
     const p2Name = updated.player2?.name || match.player2?.name || 'TBD';
     await sendPushNotification(
       storeOwnerId,
-      '📅 Match Planifié',
-      `Le match ${p1Name} vs ${p2Name} est planifié pour : ${formattedDate}.`,
+      '📅 Match Scheduled',
+      `The match ${p1Name} vs ${p2Name} is scheduled for: ${formattedDate}.`,
       { type: 'match_confirmed', matchId, tournamentId: match.tournamentId }
     );
   }

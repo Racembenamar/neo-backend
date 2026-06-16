@@ -558,7 +558,7 @@ ownerRouter.post('/tournaments', handleAsync(async (req: Request, res: Response)
   let title = `🏆 New Tournament in ${store?.name || 'NEO'}`;
   let body = `Join the new tournament: ${tournament.name}! Prize Pool: ${tournament.prizePool}.`;
 
-  const cleanDate = new Date(tournament.date).toLocaleString('fr-FR', {
+  const cleanDate = new Date(tournament.date).toLocaleString('en-US', {
     weekday: 'long',
     day: 'numeric',
     month: 'short',
@@ -566,7 +566,7 @@ ownerRouter.post('/tournaments', handleAsync(async (req: Request, res: Response)
     minute: '2-digit'
   });
 
-  const entryText = tournament.entryPrice && tournament.entryPrice.toLowerCase() !== 'gratuit'
+  const entryText = tournament.entryPrice && tournament.entryPrice.toLowerCase() !== 'free'
     ? `Entry: ${tournament.entryPrice}`
     : 'Entry: FREE';
 
@@ -1470,7 +1470,7 @@ ownerRouter.put('/matches/:id/schedule', handleAsync(async (req: Request, res: R
 
   // Notify players of referee override
   try {
-    const formattedDate = dateValue.toLocaleString('fr-FR', {
+    const formattedDate = dateValue.toLocaleString('en-US', {
       weekday: 'long',
       day: 'numeric',
       month: 'short',
