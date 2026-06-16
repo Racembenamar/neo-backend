@@ -38,6 +38,7 @@ model Player {
   matchesAsPlayer1 Match[]     @relation("Player1")
   matchesAsPlayer2 Match[]     @relation("Player2")
   pendingCashOrders PendingCashOrder[]
+  notifications Notification[]
   createdAt    DateTime      @default(now())
 
   @@map("players")
@@ -259,8 +260,13 @@ model Notification {
   id        String   @id @default(uuid())
   store     Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
   storeId   String
+  player    Player?  @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  playerId  String?
   title     String
   body      String
+  isRead    Boolean  @default(false)
+  type      String?
+  data      String?
   createdAt DateTime @default(now())
 
   @@map("notifications")

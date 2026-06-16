@@ -448,6 +448,33 @@ playerRouter.post('/tournaments/register', handleAsync(async (req: Request, res:
     }
   });
 
+  // Notify the store owner
+  try {
+    const store = await prisma.store.findUnique({
+      where: { id: storeId },
+      select: { ownerId: true }
+    });
+    
+    if (store?.ownerId) {
+      const player = await prisma.player.findUnique({
+        where: { id: playerId },
+        select: { name: true, username: true }
+      });
+      
+      const playerName = player?.name || 'Unknown';
+      const playerUsername = player?.username || 'unknown';
+      
+      await sendPushNotification(
+        store.ownerId,
+        '🏆 New Tournament Registration',
+        `${playerName} (@${playerUsername}) registered for "${tournament.name}".`,
+        { type: 'tournament_registration', tournamentId, storeId }
+      );
+    }
+  } catch (err) {
+    console.error('Error sending tournament registration notification to owner:', err);
+  }
+
   res.status(201).json(participant);
 }));
 
@@ -972,3 +999,45 @@ playerRouter.post('/matches/:id/chat', handleAsync(async (req: Request, res: Res
 
   res.status(201).json(msg);
 }));
+
+// ─────────────────────────────────────────────
+// NOTIFICATIONS API FOR PLAYERS
+// ─────────────────────────────────────────────
+
+playerRouter.get('/notifications', handleAsync(async (req: Request, res: Response) => {
+  const playerId = req.user!.id;
+  const notifications = await prisma.notification.findMany({
+    where: { playerId },
+    orderBy: { createdAt: 'desc' },
+  });
+  res.json(notifications);
+}));
+
+playerRouter.put('/notifications/read-all', handleAsync(async (req: Request, res: Response) => {
+  const playerId = req.user!.id;
+  const result = await prisma.notification.updateMany({
+    where: { playerId, isRead: false },
+    data: { isRead: true }
+  });
+  res.json({ success: true, count: result.count });
+}));
+
+playerRouter.put('/notifications/:id/read', handleAsync(async (req: Request, res: Response) => {
+  const playerId = req.user!.id;
+  const id = String(req.params.id);
+  const notification = await prisma.notification.update({
+    where: { id, playerId },
+    data: { isRead: true }
+  });
+  res.json(notification);
+}));
+
+playerRouter.delete('/notifications/:id', handleAsync(async (req: Request, res: Response) => {
+  const playerId = req.user!.id;
+  const id = String(req.params.id);
+  await prisma.notification.delete({
+    where: { id, playerId }
+  });
+  res.json({ success: true });
+}));
+

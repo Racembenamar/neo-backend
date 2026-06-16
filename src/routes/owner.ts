@@ -1544,7 +1544,7 @@ ownerRouter.post('/notifications', handleAsync(async (req: Request, res: Respons
       sound: 'default' as const,
       title,
       body,
-      data: { storeId },
+      data: { storeId, type: 'broadcast' },
     });
   }
 
@@ -1560,21 +1560,41 @@ ownerRouter.post('/notifications', handleAsync(async (req: Request, res: Respons
     }
   }
 
-  // 4. Save to DB
+  // 4. Save broadcast template (with playerId: null) for owner's sent logs
   const notification = await prisma.notification.create({
     data: {
       storeId,
+      playerId: null,
       title,
       body,
+      type: 'broadcast',
+      isRead: false
     }
   });
+
+  // 5. Save a copy of the notification for each player in the store (inboxes)
+  if (playerIds.length > 0) {
+    await prisma.notification.createMany({
+      data: playerIds.map(pId => ({
+        storeId,
+        playerId: pId,
+        title,
+        body,
+        type: 'broadcast',
+        isRead: false
+      }))
+    });
+  }
 
   res.status(201).json({ success: true, notification, ticketsCount: tickets.length });
 }));
 
 ownerRouter.get('/notifications', handleAsync(async (req: Request, res: Response) => {
   const notifications = await prisma.notification.findMany({
-    where: { storeId: req.user!.storeId! },
+    where: { 
+      storeId: req.user!.storeId!,
+      playerId: null // Fetch only the broadcast templates / logs
+    },
     orderBy: { createdAt: 'desc' },
   });
   res.json(notifications);
