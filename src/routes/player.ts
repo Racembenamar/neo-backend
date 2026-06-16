@@ -147,7 +147,7 @@ playerRouter.get('/activity/:storeId', handleAsync(async (req: Request, res: Res
       id: p.id,
       type: 'purchase',
       title: `SHOP: ${p.productName.toUpperCase()}`,
-      earned: 0,
+      earned: p.pointsEarned || 0,
       spent: p.pointsSpent,
       date: p.createdAt,
     })),
