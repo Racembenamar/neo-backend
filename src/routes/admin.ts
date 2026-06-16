@@ -138,3 +138,40 @@ adminRouter.delete('/stores/:id', handleAsync(async (req: Request, res: Response
 
   res.status(204).send();
 }));
+
+// GET /api/admin/group-points-tournaments - list all Group Points tournaments
+adminRouter.get('/group-points-tournaments', handleAsync(async (_req: Request, res: Response) => {
+  const tournaments = await prisma.tournament.findMany({
+    where: { format: 'group_points' },
+    include: {
+      store: {
+        select: {
+          id: true,
+          name: true,
+          owner: { select: { id: true, name: true, username: true } },
+        },
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+  res.json(tournaments);
+}));
+
+// PATCH /api/admin/tournaments/:id/toggle-group-points-permission - toggle permission for Group Points tournament
+adminRouter.patch('/tournaments/:id/toggle-group-points-permission', handleAsync(async (req: Request, res: Response) => {
+  const current = await prisma.tournament.findUnique({ where: { id: String(req.params.id) } });
+  if (!current) throw new AppError(404, 'Tournament not found');
+  if (current.format !== 'group_points') throw new AppError(400, 'Only Group Points tournaments require permission');
+
+  const newApproved = !current.groupPointsApproved;
+  const updated = await prisma.tournament.update({
+    where: { id: String(req.params.id) },
+    data: {
+      groupPointsApproved: newApproved,
+      // If we revoke permission, automatically set isActive to false
+      ...(!newApproved && { isActive: false }),
+    },
+  });
+  res.json(updated);
+}));
+

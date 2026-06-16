@@ -219,6 +219,7 @@ model Tournament {
   registeredPlayers Int     @default(0)
   status           String   @default("open")
   isActive         Boolean  @default(true)
+  groupPointsApproved Boolean @default(false)
   imageUrl         String?
   format           String   @default("single_elimination")
   groupSize        Int?

@@ -549,6 +549,7 @@ ownerRouter.post('/tournaments', handleAsync(async (req: Request, res: Response)
       ...data,
       date: new Date(data.date),
       storeId,
+      isActive: data.format === 'group_points' ? false : true,
     },
   });
 
@@ -627,6 +628,11 @@ ownerRouter.put('/tournaments/:id', handleAsync(async (req: Request, res: Respon
     throw new AppError(400, 'Cannot change the status of a completed tournament');
   }
 
+  if (data.format === 'group_points' && existing.format !== 'group_points') {
+    updateData.isActive = false;
+    updateData.groupPointsApproved = false;
+  }
+
   const tournament = await prisma.tournament.update({
     where: { id: String(req.params.id), storeId: req.user!.storeId! },
     data: updateData,
@@ -646,6 +652,9 @@ ownerRouter.patch('/tournaments/:id/toggle', handleAsync(async (req: Request, re
   if (!current) {
     res.status(404).json({ error: 'Tournament not found' });
     return;
+  }
+  if (!current.isActive && current.format === 'group_points' && !current.groupPointsApproved) {
+    throw new AppError(403, 'Cannot activate Group Points tournament without admin permission');
   }
   const tournament = await prisma.tournament.update({
     where: { id: String(req.params.id) },
