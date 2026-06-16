@@ -1593,10 +1593,14 @@ ownerRouter.post('/notifications', handleAsync(async (req: Request, res: Respons
 }));
 
 ownerRouter.get('/notifications', handleAsync(async (req: Request, res: Response) => {
+  const ownerId = req.user!.id;
   const notifications = await prisma.notification.findMany({
     where: { 
       storeId: req.user!.storeId!,
-      playerId: null // Fetch only the broadcast templates / logs
+      OR: [
+        { playerId: null },
+        { playerId: ownerId }
+      ]
     },
     orderBy: { createdAt: 'desc' },
   });

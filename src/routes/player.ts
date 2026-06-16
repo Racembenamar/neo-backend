@@ -977,7 +977,7 @@ playerRouter.post('/matches/:id/accept', handleAsync(async (req: Request, res: R
       storeOwnerId,
       '📅 Match Planifié',
       `Le match ${p1Name} vs ${p2Name} est planifié pour : ${formattedDate}.`,
-      { type: 'match_confirmed', matchId }
+      { type: 'match_confirmed', matchId, tournamentId: match.tournamentId }
     );
   }
 
