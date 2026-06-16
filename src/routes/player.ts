@@ -136,6 +136,24 @@ playerRouter.get('/stats/:storeId', handleAsync(async (req: Request, res: Respon
     totalSpent: +totalSpent.toFixed(3),
     totalSessions,
     tierConfig: link.store.tierConfig,
+    store: {
+      id: link.store.id,
+      name: link.store.name,
+      city: link.store.city,
+      route: link.store.route,
+      address: link.store.address,
+      phone: link.store.phone,
+      logoUrl: link.store.logoUrl,
+      bannerUrl: link.store.bannerUrl,
+      description: link.store.description,
+      openingHours: link.store.openingHours,
+      wifiSsid: link.store.wifiSsid,
+      wifiPassword: link.store.wifiPassword,
+      instagramUrl: link.store.instagramUrl,
+      facebookUrl: link.store.facebookUrl,
+      discordUrl: link.store.discordUrl,
+      googleMapsUrl: link.store.googleMapsUrl,
+    }
   });
 }));
 

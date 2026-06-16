@@ -45,25 +45,37 @@ model Player {
 }
 
 model Store {
-  id          String        @id @default(uuid())
-  name        String
-  address     String?
-  phone       String?
-  logoUrl     String?
-  isActive    Boolean       @default(true)
-  owner       Player        @relation("StoreOwner", fields: [ownerId], references: [id])
-  ownerId     String        @unique
-  gameTypes   GameType[]
-  playerLinks PlayerStore[]
-  sessions    Session[]
-  purchases   Purchase[]
-  tierConfig  TierConfig?
-  qrPayments  QrPayment[]
-  products    Product[]
-  tournaments Tournament[]
+  id            String             @id @default(uuid())
+  name          String
+  address       String?
+  phone         String?
+  logoUrl       String?
+  city          String?
+  route         String?
+  description   String?
+  instagramUrl  String?
+  facebookUrl   String?
+  discordUrl    String?
+  bannerUrl     String?
+  websiteUrl    String?
+  openingHours  String?
+  wifiSsid      String?
+  wifiPassword  String?
+  googleMapsUrl String?
+  isActive      Boolean            @default(true)
+  owner         Player             @relation("StoreOwner", fields: [ownerId], references: [id])
+  ownerId       String             @unique
+  gameTypes     GameType[]
+  playerLinks   PlayerStore[]
+  sessions      Session[]
+  purchases     Purchase[]
+  tierConfig    TierConfig?
+  qrPayments    QrPayment[]
+  products      Product[]
+  tournaments   Tournament[]
   notifications Notification[]
   pendingCashOrders PendingCashOrder[]
-  createdAt   DateTime      @default(now())
+  createdAt     DateTime           @default(now())
 
   @@map("stores")
 }

@@ -109,6 +109,7 @@ ownerRouter.get('/scan-player/:playerId', handleAsync(async (req: Request, res: 
 const sessionItemSchema = z.object({
   gameTypeId: z.string().min(1),
   quantity: z.number().positive(), // hours or number of games
+  customSubtotal: z.number().nonnegative().optional(),
 });
 
 const createSessionSchema = z.object({
@@ -155,9 +156,11 @@ ownerRouter.post('/sessions', handleAsync(async (req: Request, res: Response) =>
   }
 
   // Calculate subtotals
-  const sessionItems = items.map((item: { gameTypeId: string; quantity: number }) => {
+  const sessionItems = items.map((item: { gameTypeId: string; quantity: number; customSubtotal?: number }) => {
     const gameType = gameTypes.find((g: { id: string }) => g.id === item.gameTypeId)!;
-    const subtotal = +(gameType.pricePerUnit * item.quantity).toFixed(3);
+    const subtotal = item.customSubtotal !== undefined && item.customSubtotal !== null
+      ? +item.customSubtotal.toFixed(3)
+      : +(gameType.pricePerUnit * item.quantity).toFixed(3);
     return { gameTypeId: item.gameTypeId, quantity: item.quantity, subtotal };
   });
 
@@ -1840,6 +1843,47 @@ ownerRouter.put('/tournaments/:id/replace-player', handleAsync(async (req: Reque
   }
 
   res.json({ success: true });
+}));
+
+// ─────────────────────────────────────────────
+// STORE PROFILE MANAGEMENT
+// ─────────────────────────────────────────────
+
+const storeUpdateSchema = z.object({
+  name: z.string().min(1),
+  city: z.string().optional().nullable(),
+  route: z.string().optional().nullable(),
+  address: z.string().optional().nullable(),
+  phone: z.string().optional().nullable(),
+  logoUrl: z.string().optional().nullable(),
+  bannerUrl: z.string().optional().nullable(),
+  description: z.string().optional().nullable(),
+  openingHours: z.string().optional().nullable(),
+  wifiSsid: z.string().optional().nullable(),
+  wifiPassword: z.string().optional().nullable(),
+  instagramUrl: z.string().optional().nullable(),
+  facebookUrl: z.string().optional().nullable(),
+  discordUrl: z.string().optional().nullable(),
+  googleMapsUrl: z.string().optional().nullable(),
+});
+
+ownerRouter.get('/store', handleAsync(async (req: Request, res: Response) => {
+  const storeId = req.user!.storeId!;
+  const store = await prisma.store.findUnique({
+    where: { id: storeId },
+  });
+  if (!store) throw new AppError(404, 'Store not found');
+  res.json(store);
+}));
+
+ownerRouter.put('/store', handleAsync(async (req: Request, res: Response) => {
+  const storeId = req.user!.storeId!;
+  const data = storeUpdateSchema.parse(req.body);
+  const updatedStore = await prisma.store.update({
+    where: { id: storeId },
+    data,
+  });
+  res.json(updatedStore);
 }));
 
 
