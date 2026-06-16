@@ -37,6 +37,7 @@ model Player {
   deviceTokens DeviceToken[]
   matchesAsPlayer1 Match[]     @relation("Player1")
   matchesAsPlayer2 Match[]     @relation("Player2")
+  pendingCashOrders PendingCashOrder[]
   createdAt    DateTime      @default(now())
 
   @@map("players")
@@ -60,6 +61,7 @@ model Store {
   products    Product[]
   tournaments Tournament[]
   notifications Notification[]
+  pendingCashOrders PendingCashOrder[]
   createdAt   DateTime      @default(now())
 
   @@map("stores")
@@ -95,6 +97,7 @@ model TierConfig {
   tier4Pct           Float  @default(20)
   tier5Pct           Float  @default(25)
   pointsPerDt        Int    @default(50)
+  shopCashbackPct    Float  @default(5)
 
   @@map("tier_configs")
 }
@@ -137,6 +140,8 @@ model Purchase {
   playerId      String
   productName   String
   pointsSpent   Int
+  cashSpent     Float?
+  pointsEarned  Int?
   createdAt     DateTime @default(now())
 
   @@map("purchases")
@@ -176,11 +181,29 @@ model Product {
   name          String
   description   String?
   priceInPoints Int
+  priceInDt     Float?
   imageUrl      String?
   isActive      Boolean  @default(true)
+  pendingCashOrders PendingCashOrder[]
   createdAt     DateTime @default(now())
 
   @@map("products")
+}
+
+model PendingCashOrder {
+  id           String   @id @default(uuid())
+  player       Player   @relation(fields: [playerId], references: [id])
+  playerId     String
+  store        Store    @relation(fields: [storeId], references: [id])
+  storeId      String
+  product      Product  @relation(fields: [productId], references: [id])
+  productId    String
+  amountDt     Float
+  pointsToEarn Int
+  status       String   @default("pending") // pending, completed, cancelled
+  createdAt    DateTime @default(now())
+
+  @@map("pending_cash_orders")
 }
 
 model Tournament {

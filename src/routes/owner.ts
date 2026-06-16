@@ -86,11 +86,19 @@ ownerRouter.get('/scan-player/:playerId', handleAsync(async (req: Request, res: 
     where: { playerId_storeId: { playerId: player.id, storeId } },
   });
 
+  // Check for pending cash shop orders
+  const pendingOrder = await prisma.pendingCashOrder.findFirst({
+    where: { storeId, playerId: player.id, status: 'pending' },
+    include: { product: true },
+    orderBy: { createdAt: 'desc' }
+  });
+
   res.json({
     player,
     totalPoints: link?.totalPoints ?? 0,
     tier: link?.tier ?? 1,
     isFirstVisit: !link,
+    pendingOrder
   });
 }));
 
@@ -242,6 +250,7 @@ const tierConfigSchema = z.object({
   tier4Pct: z.number().min(0).max(100).optional(),
   tier5Pct: z.number().min(0).max(100).optional(),
   pointsPerDt: z.number().int().positive().optional(),
+  shopCashbackPct: z.number().min(0).max(100).optional(),
 });
 
 ownerRouter.get('/tier-config', handleAsync(async (req: Request, res: Response) => {
@@ -283,6 +292,7 @@ const productSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
   priceInPoints: z.number().int().positive(),
+  priceInDt: z.number().positive().optional().nullable(),
   imageUrl: z.string().optional(),
 });
 
@@ -330,6 +340,92 @@ ownerRouter.patch('/products/:id/toggle', handleAsync(async (req: Request, res: 
     data: { isActive: !current.isActive },
   });
   res.json(product);
+}));
+
+// ─────────────────────────────────────────────
+// PENDING CASH ORDERS (SHOP)
+// ─────────────────────────────────────────────
+
+ownerRouter.get('/shop/pending-order/:playerId', handleAsync(async (req: Request, res: Response) => {
+  const storeId = req.user!.storeId!;
+  const playerId = String(req.params.playerId);
+
+  const pendingOrder = await prisma.pendingCashOrder.findFirst({
+    where: {
+      storeId,
+      playerId,
+      status: 'pending'
+    },
+    include: {
+      player: { select: { name: true, username: true } },
+      product: { select: { name: true } }
+    },
+    orderBy: { createdAt: 'desc' }
+  });
+
+  res.json(pendingOrder);
+}));
+
+ownerRouter.post('/shop/confirm-cash-payment', handleAsync(async (req: Request, res: Response) => {
+  const { pendingOrderId } = z.object({
+    pendingOrderId: z.string().uuid()
+  }).parse(req.body);
+  const storeId = req.user!.storeId!;
+
+  const pendingOrder = await prisma.pendingCashOrder.findFirst({
+    where: { id: pendingOrderId, storeId, status: 'pending' },
+    include: { product: true }
+  });
+
+  if (!pendingOrder) {
+    throw new AppError(404, 'Pending order not found or already completed');
+  }
+
+  // Transaction to complete order, give points, and log purchase
+  const result = await prisma.$transaction(async (tx) => {
+    // 1. Mark as completed
+    const order = await tx.pendingCashOrder.update({
+      where: { id: pendingOrderId },
+      data: { status: 'completed' }
+    });
+
+    // 2. Add points to player link
+    const playerLink = await tx.playerStore.findUnique({
+      where: { playerId_storeId: { playerId: order.playerId, storeId } }
+    });
+
+    if (playerLink) {
+      await tx.playerStore.update({
+        where: { id: playerLink.id },
+        data: { totalPoints: { increment: order.pointsToEarn } }
+      });
+    } else {
+      await tx.playerStore.create({
+        data: {
+          playerId: order.playerId,
+          storeId,
+          totalPoints: order.pointsToEarn,
+          tier: 1
+        }
+      });
+    }
+
+    // 3. Log purchase
+    await tx.purchase.create({
+      data: {
+        storeId,
+        playerId: order.playerId,
+        productName: pendingOrder.product.name,
+        pointsSpent: 0,
+        cashSpent: order.amountDt,
+        pointsEarned: order.pointsToEarn
+      }
+    });
+
+    return order;
+  });
+
+  res.json(result);
 }));
 
 // ─────────────────────────────────────────────

@@ -320,6 +320,60 @@ playerRouter.post('/purchase', handleAsync(async (req: Request, res: Response) =
   });
 }));
 
+const pendingCashOrderSchema = z.object({
+  storeId: z.string().min(1),
+  productId: z.string().min(1),
+});
+
+playerRouter.post('/shop/pending-order', handleAsync(async (req: Request, res: Response) => {
+  const { storeId, productId } = pendingCashOrderSchema.parse(req.body);
+  const playerId = req.user!.id;
+
+  const product = await prisma.product.findUnique({ where: { id: productId } });
+  if (!product || !product.isActive || product.priceInDt == null) {
+    throw new AppError(404, 'Product not found or cash price unavailable');
+  }
+
+  const tierConfig = await prisma.tierConfig.findUnique({ where: { storeId } });
+  const cashbackPct = tierConfig?.shopCashbackPct ?? 5; // Default 5%
+
+  // Example: 10 DT * (5/100) * 1000 pts/DT
+  // pointsPerDt is usually 1000 in this context, but let's use config if available, else 1000
+  const pointsPerDt = tierConfig?.pointsPerDt ?? 1000;
+  
+  // Calculate points to earn
+  const pointsToEarn = Math.floor((product.priceInDt * (cashbackPct / 100)) * pointsPerDt);
+
+  // Mark previous pending orders for this player+store as cancelled to avoid duplicates
+  await prisma.pendingCashOrder.updateMany({
+    where: { playerId, storeId, status: 'pending' },
+    data: { status: 'cancelled' }
+  });
+
+  const order = await prisma.pendingCashOrder.create({
+    data: {
+      playerId,
+      storeId,
+      productId,
+      amountDt: product.priceInDt,
+      pointsToEarn,
+      status: 'pending'
+    }
+  });
+
+  res.status(201).json(order);
+}));
+
+playerRouter.get('/shop/pending-order-status/:id', handleAsync(async (req: Request, res: Response) => {
+  const order = await prisma.pendingCashOrder.findUnique({
+    where: { id: String(req.params.id) },
+    select: { status: true, pointsToEarn: true }
+  });
+  
+  if (!order) throw new AppError(404, 'Order not found');
+  res.json(order);
+}));
+
 // ─────────────────────────────────────────────
 // TOURNAMENTS
 // ─────────────────────────────────────────────
