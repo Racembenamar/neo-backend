@@ -405,6 +405,32 @@ playerRouter.get('/tournaments/:storeId', handleAsync(async (req: Request, res: 
   res.json(data);
 }));
 
+playerRouter.get('/tournaments/single/:id', handleAsync(async (req: Request, res: Response) => {
+  const tournamentId = String(req.params.id);
+  const playerId = req.user!.id;
+
+  const tournament = await prisma.tournament.findUnique({
+    where: { id: tournamentId },
+    include: {
+      participants: {
+        where: { playerId }
+      }
+    }
+  });
+
+  if (!tournament) throw new AppError(404, 'Tournament not found');
+
+  const registrationStatus = tournament.participants[0] 
+    ? tournament.participants[0].status 
+    : 'unregistered';
+
+  res.json({
+    ...tournament,
+    participants: undefined,
+    registrationStatus
+  });
+}));
+
 const registerTournamentSchema = z.object({
   storeId: z.string().min(1),
   tournamentId: z.string().min(1),
