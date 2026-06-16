@@ -446,6 +446,17 @@ playerRouter.get('/tournaments/:storeId', handleAsync(async (req: Request, res: 
   const storeId = String(req.params.storeId);
   const playerId = req.user!.id;
 
+  // Auto-open tournaments that have reached their scheduled date/time
+  await prisma.tournament.updateMany({
+    where: {
+      status: 'coming_soon',
+      date: { lte: new Date() }
+    },
+    data: {
+      status: 'open'
+    }
+  });
+
   const tournaments = await prisma.tournament.findMany({
     where: { storeId, isActive: true },
     include: {
@@ -472,6 +483,17 @@ playerRouter.get('/tournaments/:storeId', handleAsync(async (req: Request, res: 
 playerRouter.get('/tournaments/single/:id', handleAsync(async (req: Request, res: Response) => {
   const tournamentId = String(req.params.id);
   const playerId = req.user!.id;
+
+  // Auto-open tournaments that have reached their scheduled date/time
+  await prisma.tournament.updateMany({
+    where: {
+      status: 'coming_soon',
+      date: { lte: new Date() }
+    },
+    data: {
+      status: 'open'
+    }
+  });
 
   const tournament = await prisma.tournament.findUnique({
     where: { id: tournamentId },
@@ -508,6 +530,17 @@ playerRouter.post('/tournaments/register', handleAsync(async (req: Request, res:
     where: { playerId_storeId: { playerId, storeId } },
   });
   if (!link) throw new AppError(404, 'Not enrolled in this store');
+
+  // Auto-open tournaments that have reached their scheduled date/time
+  await prisma.tournament.updateMany({
+    where: {
+      status: 'coming_soon',
+      date: { lte: new Date() }
+    },
+    data: {
+      status: 'open'
+    }
+  });
 
   const tournament = await prisma.tournament.findUnique({
     where: { id: tournamentId, storeId }

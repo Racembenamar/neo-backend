@@ -142,6 +142,17 @@ adminRouter.delete('/stores/:id', handleAsync(async (req: Request, res: Response
 
 // GET /api/admin/group-points-tournaments - list all Group Points tournaments
 adminRouter.get('/group-points-tournaments', handleAsync(async (_req: Request, res: Response) => {
+  // Auto-open tournaments that have reached their scheduled date/time
+  await prisma.tournament.updateMany({
+    where: {
+      status: 'coming_soon',
+      date: { lte: new Date() }
+    },
+    data: {
+      status: 'open'
+    }
+  });
+
   const tournaments = await prisma.tournament.findMany({
     where: { format: 'group_points' },
     include: {

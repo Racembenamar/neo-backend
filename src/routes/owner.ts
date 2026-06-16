@@ -525,6 +525,17 @@ const tournamentSchema = z.object({
 });
 
 ownerRouter.get('/tournaments', handleAsync(async (req: Request, res: Response) => {
+  // Auto-open tournaments that have reached their scheduled date/time
+  await prisma.tournament.updateMany({
+    where: {
+      status: 'coming_soon',
+      date: { lte: new Date() }
+    },
+    data: {
+      status: 'open'
+    }
+  });
+
   const tournaments = await prisma.tournament.findMany({
     where: { storeId: req.user!.storeId! },
     include: {
@@ -735,6 +746,17 @@ function getRoundRobinMatches(players: string[]) {
 ownerRouter.post('/tournaments/:id/start', handleAsync(async (req: Request, res: Response) => {
   const tournamentId = String(req.params.id);
   const storeId = req.user!.storeId!;
+
+  // Auto-open tournaments that have reached their scheduled date/time
+  await prisma.tournament.updateMany({
+    where: {
+      status: 'coming_soon',
+      date: { lte: new Date() }
+    },
+    data: {
+      status: 'open'
+    }
+  });
 
   // ── 1. Read-only validation (no transaction needed) ──────────────────────
   const tournament = await prisma.tournament.findUnique({
