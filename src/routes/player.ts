@@ -5,6 +5,7 @@ import { requireAuth, requireRole } from '../middleware/auth';
 import { handleAsync, AppError } from '../middleware/errorHandler';
 import { z } from 'zod';
 import { sendPushNotification } from '../services/notification.service';
+import { checkPendingUpgrade } from '../services/tier.service';
 
 export const playerRouter = Router();
 playerRouter.use(requireAuth, requireRole('player', 'owner'));
@@ -60,6 +61,17 @@ playerRouter.get('/stats/:storeId', handleAsync(async (req: Request, res: Respon
     include: { store: { include: { tierConfig: true } } },
   });
   if (!link) throw new AppError(404, 'Not enrolled in this store');
+
+  if (link.store.tierConfig) {
+    const isEligible = checkPendingUpgrade(link.totalPoints, link.tier, link.store.tierConfig);
+    if (link.pendingUpgrade !== isEligible) {
+      await prisma.playerStore.update({
+        where: { playerId_storeId: { playerId, storeId } },
+        data: { pendingUpgrade: isEligible }
+      });
+      link.pendingUpgrade = isEligible;
+    }
+  }
 
   const sessions = await prisma.session.findMany({
     where: { playerId, storeId: String(storeId) },
@@ -170,9 +182,20 @@ playerRouter.post('/tier-upgrade', handleAsync(async (req: Request, res: Respons
     include: { store: { include: { tierConfig: true } } },
   });
   if (!link) throw new AppError(404, 'Not enrolled in this store');
+  if (!link.store.tierConfig) throw new AppError(500, 'Tier config missing');
+
+  // Dynamically update eligibility in case config changed
+  const isEligible = checkPendingUpgrade(link.totalPoints, link.tier, link.store.tierConfig);
+  if (link.pendingUpgrade !== isEligible) {
+    await prisma.playerStore.update({
+      where: { playerId_storeId: { playerId, storeId } },
+      data: { pendingUpgrade: isEligible }
+    });
+    link.pendingUpgrade = isEligible;
+  }
+
   if (!link.pendingUpgrade) throw new AppError(400, 'No tier upgrade available');
   if (link.tier >= 5) throw new AppError(400, 'Already at maximum tier');
-  if (!link.store.tierConfig) throw new AppError(500, 'Tier config missing');
 
   // Determine points to deduct (the threshold of the NEXT tier)
   let pointsToDeduct = 0;
@@ -257,18 +280,26 @@ playerRouter.post('/purchase', handleAsync(async (req: Request, res: Response) =
 
   const link = await prisma.playerStore.findUnique({
     where: { playerId_storeId: { playerId, storeId } },
+    include: { store: { include: { tierConfig: true } } },
   });
   
   if (!link) throw new AppError(404, 'Not enrolled in this store');
   if (link.totalPoints < product.priceInPoints) {
     throw new AppError(400, 'Insufficient points to purchase this item');
   }
+  if (!link.store.tierConfig) throw new AppError(500, 'Tier config missing');
+
+  const newTotalPoints = link.totalPoints - product.priceInPoints;
+  const pendingUpgrade = checkPendingUpgrade(newTotalPoints, link.tier, link.store.tierConfig);
 
   // Deduct points and create purchase record in a transaction
   const [updatedLink, purchase] = await prisma.$transaction([
     prisma.playerStore.update({
       where: { playerId_storeId: { playerId, storeId } },
-      data: { totalPoints: { decrement: product.priceInPoints } },
+      data: { 
+        totalPoints: { decrement: product.priceInPoints },
+        pendingUpgrade
+      },
     }),
     prisma.purchase.create({
       data: {

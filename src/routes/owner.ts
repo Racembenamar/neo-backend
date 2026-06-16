@@ -256,8 +256,24 @@ ownerRouter.put('/tier-config', handleAsync(async (req: Request, res: Response) 
     where: { storeId: req.user!.storeId! },
     data,
   });
+
+  // Recalculate pendingUpgrade for all player links in this store under the new config
+  const playerLinks = await prisma.playerStore.findMany({
+    where: { storeId: req.user!.storeId! }
+  });
+  for (const link of playerLinks) {
+    const isEligible = checkPendingUpgrade(link.totalPoints, link.tier, config);
+    if (link.pendingUpgrade !== isEligible) {
+      await prisma.playerStore.update({
+        where: { id: link.id },
+        data: { pendingUpgrade: isEligible }
+      });
+    }
+  }
+
   res.json(config);
 }));
+
 
 // ─────────────────────────────────────────────
 // PRODUCTS (SHOP)
