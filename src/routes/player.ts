@@ -194,7 +194,9 @@ playerRouter.get('/activity/:storeId', handleAsync(async (req: Request, res: Res
     ...purchases.map(p => ({
       id: p.id,
       type: 'purchase',
-      title: `SHOP: ${p.productName.toUpperCase()}`,
+      title: p.productName.includes('Admin') || p.productName.includes('Tier')
+        ? p.productName.toUpperCase()
+        : `SHOP: ${p.productName.toUpperCase()}`,
       earned: p.pointsEarned || 0,
       spent: p.pointsSpent,
       date: p.createdAt,
@@ -259,13 +261,27 @@ playerRouter.post('/tier-upgrade', handleAsync(async (req: Request, res: Respons
     throw new AppError(400, `Insufficient points for ${nextTier} upgrade. Need ${pointsToDeduct} pts.`);
   }
 
-  const updated = await prisma.playerStore.update({
-    where: { playerId_storeId: { playerId, storeId } },
-    data: { 
-      tier: nextTier, 
-      pendingUpgrade: false,
-      totalPoints: { decrement: pointsToDeduct }
-    },
+  const updated = await prisma.$transaction(async (tx) => {
+    const upd = await tx.playerStore.update({
+      where: { playerId_storeId: { playerId, storeId } },
+      data: { 
+        tier: nextTier, 
+        pendingUpgrade: false,
+        totalPoints: { decrement: pointsToDeduct }
+      },
+    });
+
+    await tx.purchase.create({
+      data: {
+        playerId,
+        storeId,
+        productName: `Tier Upgrade to Level ${nextTier}`,
+        pointsSpent: pointsToDeduct,
+        pointsEarned: 0,
+      }
+    });
+
+    return upd;
   });
 
   res.json({ 
