@@ -78,6 +78,7 @@ model PlayerStore {
   totalPoints    Int      @default(0)
   pendingUpgrade Boolean  @default(false)
   joinedAt       DateTime @default(now())
+  notificationsMuted Boolean @default(false)
 
   @@unique([playerId, storeId])
   @@map("player_stores")

@@ -1527,9 +1527,12 @@ ownerRouter.post('/notifications', handleAsync(async (req: Request, res: Respons
   const { title, body } = notificationSchema.parse(req.body);
   const storeId = req.user!.storeId!;
 
-  // 1. Get all players for this store
+  // 1. Get all players for this store who haven't muted notifications
   const playerLinks = await prisma.playerStore.findMany({
-    where: { storeId },
+    where: { 
+      storeId,
+      notificationsMuted: false
+    },
     select: { playerId: true }
   });
   const playerIds = playerLinks.map(l => l.playerId);

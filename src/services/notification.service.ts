@@ -49,6 +49,15 @@ export async function sendPushNotification(
   try {
     const storeId = await resolveStoreId(playerId, data);
     if (storeId) {
+      // Check if player has muted notifications for this store
+      const link = await prisma.playerStore.findUnique({
+        where: { playerId_storeId: { playerId, storeId } }
+      });
+      if (link?.notificationsMuted) {
+        console.log(`[Notification Service] Store ${storeId} is muted for player ${playerId}. Skipping notification.`);
+        return;
+      }
+
       await prisma.notification.create({
         data: {
           storeId,
@@ -109,29 +118,47 @@ export async function sendPushNotificationToMultiple(
 ): Promise<void> {
   if (playerIds.length === 0) return;
 
+  let activePlayerIds = playerIds;
+
   // 1. Save to DB for all recipient players
   try {
     const storeId = await resolveStoreId(playerIds[0], data);
     if (storeId) {
-      await prisma.notification.createMany({
-        data: playerIds.map(playerId => ({
+      // Filter out players who have muted notifications for this store
+      const mutedLinks = await prisma.playerStore.findMany({
+        where: {
           storeId,
-          playerId,
-          title,
-          body,
-          type: data?.type || null,
-          data: data ? JSON.stringify(data) : null,
-          isRead: false
-        }))
+          playerId: { in: playerIds },
+          notificationsMuted: true
+        },
+        select: { playerId: true }
       });
+      const mutedPlayerIds = new Set(mutedLinks.map(l => l.playerId));
+      activePlayerIds = playerIds.filter(id => !mutedPlayerIds.has(id));
+
+      if (activePlayerIds.length > 0) {
+        await prisma.notification.createMany({
+          data: activePlayerIds.map(playerId => ({
+            storeId,
+            playerId,
+            title,
+            body,
+            type: data?.type || null,
+            data: data ? JSON.stringify(data) : null,
+            isRead: false
+          }))
+        });
+      }
     }
   } catch (error) {
     console.error('Error saving multiple notifications to DB:', error);
   }
 
+  if (activePlayerIds.length === 0) return;
+
   // 2. Fetch tokens and send push alerts
   const deviceTokens = await prisma.deviceToken.findMany({
-    where: { playerId: { in: playerIds } }
+    where: { playerId: { in: activePlayerIds } }
   });
 
   if (deviceTokens.length === 0) return;

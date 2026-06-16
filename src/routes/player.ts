@@ -25,12 +25,31 @@ playerRouter.get('/stores', handleAsync(async (req: Request, res: Response) => {
 
 // GET /api/player/all-stores - list ALL active stores
 playerRouter.get('/all-stores', handleAsync(async (req: Request, res: Response) => {
+  const playerId = req.user!.id;
   const stores = await prisma.store.findMany({
     where: { isActive: true },
-    select: { id: true, name: true, address: true, phone: true, logoUrl: true },
+    include: {
+      playerLinks: {
+        where: { playerId },
+      }
+    },
     orderBy: { name: 'asc' },
   });
-  res.json(stores);
+
+  const formatted = stores.map(store => {
+    const link = store.playerLinks[0];
+    return {
+      id: store.id,
+      name: store.name,
+      address: store.address,
+      phone: store.phone,
+      logoUrl: store.logoUrl,
+      notificationsMuted: link ? link.notificationsMuted : false,
+      isJoined: !!link,
+    };
+  });
+
+  res.json(formatted);
 }));
 
 // POST /api/player/join-store - select/join a store
@@ -49,6 +68,35 @@ playerRouter.post('/join-store', handleAsync(async (req: Request, res: Response)
   });
 
   res.json({ success: true, link });
+}));
+
+// POST /api/player/stores/:storeId/toggle-mute - toggle mute notifications for a store
+playerRouter.post('/stores/:storeId/toggle-mute', handleAsync(async (req: Request, res: Response) => {
+  const storeId = String(req.params.storeId);
+  const playerId = req.user!.id;
+
+  const store = await prisma.store.findUnique({ where: { id: storeId, isActive: true } });
+  if (!store) throw new AppError(404, 'Store not found or inactive');
+
+  const link = await prisma.playerStore.findUnique({
+    where: { playerId_storeId: { playerId, storeId } }
+  });
+
+  const updatedLink = await prisma.playerStore.upsert({
+    where: { playerId_storeId: { playerId, storeId } },
+    update: {
+      notificationsMuted: link ? !link.notificationsMuted : true
+    },
+    create: {
+      playerId,
+      storeId,
+      tier: 1,
+      totalPoints: 0,
+      notificationsMuted: true
+    }
+  });
+
+  res.json({ success: true, notificationsMuted: updatedLink.notificationsMuted });
 }));
 
 // GET /api/player/stats/:storeId
