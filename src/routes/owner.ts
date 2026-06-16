@@ -589,6 +589,8 @@ ownerRouter.post('/tournaments', handleAsync(async (req: Request, res: Response)
       storeId,
       title,
       body,
+      type: 'tournament_created',
+      data: JSON.stringify({ tournamentId: tournament.id, storeId })
     }
   });
 
@@ -602,7 +604,8 @@ ownerRouter.post('/tournaments', handleAsync(async (req: Request, res: Response)
   if (playerIds.length > 0) {
     await sendPushNotificationToMultiple(playerIds, title, body, {
       type: 'tournament_created',
-      tournamentId: tournament.id
+      tournamentId: tournament.id,
+      storeId
     });
   }
 
