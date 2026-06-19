@@ -227,6 +227,7 @@ model Tournament {
   name             String
   date             DateTime
   prizePool        String
+  prizeDistribution String?
   entryPrice       String?  @default("Gratuit")
   maxPlayers       Int
   registeredPlayers Int     @default(0)
@@ -301,6 +302,7 @@ model Match {
   player2Score   Int            @default(0)
   winnerId       String?
   tableNumber    String?
+  posterUrl      String?
   status         String         @default("pending") // pending, live, completed
   scheduledAt    DateTime?
   proposedAt     DateTime?

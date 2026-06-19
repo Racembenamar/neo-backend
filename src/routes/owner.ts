@@ -513,10 +513,16 @@ ownerRouter.get('/reports/monthly', handleAsync(async (req: Request, res: Respon
 // TOURNAMENTS
 // ─────────────────────────────────────────────
 
+const prizeDistributionSchema = z.array(z.object({
+  rank: z.number().int().min(1),
+  amount: z.string().min(1),
+})).nullable().optional();
+
 const tournamentSchema = z.object({
   name: z.string().min(1),
   date: z.string().or(z.date()), // accepts ISO string
   prizePool: z.string().min(1),
+  prizeDistribution: prizeDistributionSchema,
   entryPrice: z.string().optional(),
   maxPlayers: z.number().int().positive(),
   status: z.enum(['open', 'coming_soon', 'completed']).optional(),
@@ -526,6 +532,60 @@ const tournamentSchema = z.object({
   advancingCount: z.number().int().positive().nullable().optional(),
   schedulingRange: z.number().int().min(1).max(90).optional(),
 });
+
+type PrizeDistributionInput = z.infer<typeof prizeDistributionSchema>;
+
+function parseMoneyToCents(value: string): number | null {
+  const normalized = value.trim().replace(',', '.');
+  const match = normalized.match(/^(\d+(?:\.\d{1,2})?)(?:\s*dt)?$/i);
+  if (!match) return null;
+  return Math.round(Number(match[1]) * 100);
+}
+
+function getMaxPaidPlaces(maxPlayers: number): number {
+  if (maxPlayers > 32) return 6;
+  if (maxPlayers > 16) return 4;
+  return 3;
+}
+
+function normalizePrizeDistribution(
+  prizePool: string,
+  maxPlayers: number,
+  prizeDistribution: PrizeDistributionInput
+): string | null | undefined {
+  if (prizeDistribution === undefined) return undefined;
+  if (!prizeDistribution || prizeDistribution.length === 0) return null;
+
+  const maxPaidPlaces = getMaxPaidPlaces(maxPlayers);
+  if (prizeDistribution.length > maxPaidPlaces) {
+    throw new AppError(400, `This tournament size allows a maximum of Top ${maxPaidPlaces} prize winners`);
+  }
+
+  const sortedDistribution = [...prizeDistribution].sort((a, b) => a.rank - b.rank);
+  const ranks = sortedDistribution.map(item => item.rank);
+  for (let i = 0; i < ranks.length; i++) {
+    if (ranks[i] !== i + 1) {
+      throw new AppError(400, 'Prize winners must be ranked from 1st place without gaps');
+    }
+  }
+
+  const prizePoolCents = parseMoneyToCents(prizePool);
+  if (prizePoolCents === null) {
+    throw new AppError(400, 'Prize Pool must be a numeric amount when prize split is enabled');
+  }
+
+  const distributionCents = sortedDistribution.map(item => parseMoneyToCents(item.amount));
+  if (distributionCents.some(amount => amount === null)) {
+    throw new AppError(400, 'Each prize split amount must be numeric');
+  }
+
+  const totalCents = distributionCents.reduce<number>((sum, amount) => sum + (amount ?? 0), 0);
+  if (totalCents !== prizePoolCents) {
+    throw new AppError(400, 'Prize split total must equal the Prize Pool');
+  }
+
+  return JSON.stringify(sortedDistribution);
+}
 
 ownerRouter.get('/tournaments', handleAsync(async (req: Request, res: Response) => {
   // Auto-open tournaments that have reached their scheduled date/time
@@ -557,10 +617,16 @@ ownerRouter.get('/tournaments', handleAsync(async (req: Request, res: Response) 
 ownerRouter.post('/tournaments', handleAsync(async (req: Request, res: Response) => {
   const data = tournamentSchema.parse(req.body);
   const storeId = req.user!.storeId!;
+  const normalizedPrizeDistribution = normalizePrizeDistribution(
+    data.prizePool,
+    data.maxPlayers,
+    data.prizeDistribution
+  );
 
   const tournament = await prisma.tournament.create({
     data: {
       ...data,
+      prizeDistribution: normalizedPrizeDistribution ?? null,
       date: new Date(data.date),
       storeId,
       isActive: data.format === 'group_points' ? false : true,
@@ -642,6 +708,17 @@ ownerRouter.put('/tournaments/:id', handleAsync(async (req: Request, res: Respon
     throw new AppError(400, 'Cannot change the status of a completed tournament');
   }
 
+  const prizePoolForValidation = data.prizePool ?? existing.prizePool;
+  const maxPlayersForValidation = data.maxPlayers ?? existing.maxPlayers;
+  const normalizedPrizeDistribution = normalizePrizeDistribution(
+    prizePoolForValidation,
+    maxPlayersForValidation,
+    data.prizeDistribution
+  );
+  if (normalizedPrizeDistribution !== undefined) {
+    updateData.prizeDistribution = normalizedPrizeDistribution;
+  }
+
   if (data.format === 'group_points' && existing.format !== 'group_points') {
     updateData.isActive = false;
     updateData.groupPointsApproved = false;
@@ -697,6 +774,15 @@ ownerRouter.put('/tournaments/:id/participants/:playerId', handleAsync(async (re
   
   if (!tournament) throw new AppError(404, 'Tournament not found');
 
+  const existingParticipant = await prisma.tournamentParticipant.findUnique({
+    where: {
+      tournamentId_playerId: { tournamentId, playerId }
+    },
+    select: { status: true }
+  });
+
+  if (!existingParticipant) throw new AppError(404, 'Participant not found');
+
   const participant = await prisma.tournamentParticipant.update({
     where: {
       tournamentId_playerId: { tournamentId, playerId }
@@ -715,6 +801,26 @@ ownerRouter.put('/tournaments/:id/participants/:playerId', handleAsync(async (re
     where: { id: tournamentId },
     data: { registeredPlayers: acceptedCount }
   });
+
+  if ((status === 'accepted' || status === 'rejected') && existingParticipant.status !== status) {
+    try {
+      const wasAccepted = status === 'accepted';
+      await sendPushNotification(
+        playerId,
+        wasAccepted ? 'Tournament Registration Approved' : 'Tournament Registration Declined',
+        wasAccepted
+          ? `Your registration for "${tournament.name}" has been approved.`
+          : `Your registration for "${tournament.name}" has been declined.`,
+        {
+          type: wasAccepted ? 'tournament_registration_accepted' : 'tournament_registration_rejected',
+          tournamentId,
+          storeId
+        }
+      );
+    } catch (err) {
+      console.error('Error sending tournament registration status notification:', err);
+    }
+  }
 
   res.json({ participant, registeredPlayers: acceptedCount });
 }));
@@ -1445,6 +1551,27 @@ ownerRouter.put('/tournaments/:id/matches/:matchId/status', handleAsync(async (r
     where: { id: matchId, tournamentId },
     data: { status, tableNumber }
   });
+  res.json(updated);
+}));
+
+ownerRouter.put('/tournaments/:id/matches/:matchId/poster', handleAsync(async (req: Request, res: Response) => {
+  const tournamentId = String(req.params.id);
+  const matchId = String(req.params.matchId);
+  const storeId = req.user!.storeId!;
+  const { posterUrl } = z.object({
+    posterUrl: z.string().optional().nullable(),
+  }).parse(req.body);
+
+  const tournament = await prisma.tournament.findUnique({
+    where: { id: tournamentId, storeId }
+  });
+  if (!tournament) throw new AppError(404, 'Tournament not found');
+
+  const updated = await prisma.match.update({
+    where: { id: matchId, tournamentId },
+    data: { posterUrl: posterUrl || null }
+  });
+
   res.json(updated);
 }));
 
