@@ -366,6 +366,9 @@ playerRouter.post('/purchase', handleAsync(async (req: Request, res: Response) =
   });
   
   if (!link) throw new AppError(404, 'Not enrolled in this store');
+  if (product.priceInPoints == null) {
+    throw new AppError(400, 'This item is only available for cash purchase');
+  }
   if (link.totalPoints < product.priceInPoints) {
     throw new AppError(400, 'Insufficient points to purchase this item');
   }

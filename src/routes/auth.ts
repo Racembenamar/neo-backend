@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { requireAuth } from '../middleware/auth';
 import { handleAsync } from '../middleware/errorHandler';
+import { normalizeWorkerPermissions } from '../lib/workerPermissions';
 
 export const authRouter = Router();
 
@@ -31,6 +32,11 @@ authRouter.post('/register', handleAsync(async (req: Request, res: Response) => 
   }
   const existAdmin = await prisma.admin.findUnique({ where: { username } });
   if (existAdmin) {
+    res.status(400).json({ error: 'Username already exists' });
+    return;
+  }
+  const existingWorker = await prisma.storeWorker.findUnique({ where: { username } });
+  if (existingWorker) {
     res.status(400).json({ error: 'Username already exists' });
     return;
   }
@@ -84,6 +90,19 @@ authRouter.post('/login', handleAsync(async (req: Request, res: Response) => {
       if (player.ownedStore) {
         storeId = player.ownedStore.id;
       }
+    } else {
+      const worker = await prisma.storeWorker.findUnique({
+        where: { username },
+      });
+      if (worker) {
+        if (!worker.isActive) {
+          res.status(403).json({ error: 'Worker account is disabled' });
+          return;
+        }
+        user = worker;
+        role = 'worker';
+        storeId = worker.storeId;
+      }
     }
   }
 
@@ -114,6 +133,7 @@ authRouter.post('/login', handleAsync(async (req: Request, res: Response) => {
       avatarUrl: user.avatarUrl,
       role,
       storeId,
+      permissions: role === 'worker' ? normalizeWorkerPermissions(user.permissions) : undefined,
     },
   });
 }));
@@ -125,6 +145,24 @@ authRouter.get('/me', requireAuth, handleAsync(async (req: Request, res: Respons
   if (role === 'admin') {
     const admin = await prisma.admin.findUnique({ where: { id } });
     res.json({ id: admin!.id, username: admin!.username, role });
+    return;
+  }
+
+  if (role === 'worker') {
+    const worker = await prisma.storeWorker.findUnique({ where: { id } });
+    if (!worker || !worker.isActive) {
+      res.status(401).json({ error: 'Worker account is disabled or no longer exists' });
+      return;
+    }
+    res.json({
+      id: worker.id,
+      username: worker.username,
+      name: worker.name,
+      phone: worker.phone,
+      role,
+      storeId: worker.storeId,
+      permissions: normalizeWorkerPermissions(worker.permissions),
+    });
     return;
   }
 

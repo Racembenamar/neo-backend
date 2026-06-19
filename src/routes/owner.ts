@@ -1,4 +1,4 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { Expo } from 'expo-server-sdk';
 import bcrypt from 'bcryptjs';
 import { sendPushNotification, sendPushNotificationToMultiple } from '../services/notification.service';
@@ -11,12 +11,56 @@ import { prisma } from '../lib/prisma';
 import { requireAuth, requireRole } from '../middleware/auth';
 import { handleAsync, AppError } from '../middleware/errorHandler';
 import {
+  DEFAULT_WORKER_PERMISSIONS,
+  WorkerPermission,
+  normalizeWorkerPermissions,
+} from '../lib/workerPermissions';
+import {
   calculatePointsEarned,
   checkPendingUpgrade,
 } from '../services/tier.service';
 
 export const ownerRouter = Router();
-ownerRouter.use(requireAuth, requireRole('owner'));
+ownerRouter.use(requireAuth, requireRole('owner', 'worker'));
+
+const WORKER_ROUTE_RULES: Array<{ method: string; pattern: RegExp; permission: WorkerPermission }> = [
+  { method: 'GET', pattern: /^\/games$/, permission: 'canAddGamesToSession' },
+  { method: 'GET', pattern: /^\/tier-config$/, permission: 'canAccessNewSession' },
+  { method: 'GET', pattern: /^\/scan-player\/[^/]+$/, permission: 'canScanPlayer' },
+  { method: 'POST', pattern: /^\/sessions$/, permission: 'canConfirmBilling' },
+  { method: 'POST', pattern: /^\/shop\/confirm-cash-payment$/, permission: 'canConfirmBilling' },
+];
+
+ownerRouter.use(handleAsync(async (req: Request, res: Response, next: NextFunction) => {
+  if (req.user!.role === 'owner') {
+    next();
+    return;
+  }
+
+  const worker = await prisma.storeWorker.findUnique({
+    where: { id: req.user!.id },
+    select: { id: true, storeId: true, isActive: true, permissions: true },
+  });
+
+  if (!worker || !worker.isActive) {
+    throw new AppError(403, 'Worker account is disabled');
+  }
+
+  req.user!.storeId = worker.storeId;
+  const rule = WORKER_ROUTE_RULES.find((candidate) =>
+    candidate.method === req.method && candidate.pattern.test(req.path)
+  );
+  if (!rule) {
+    throw new AppError(403, 'Workers do not have access to this action');
+  }
+
+  const permissions = normalizeWorkerPermissions(worker.permissions);
+  if (!permissions[rule.permission]) {
+    throw new AppError(403, `Missing worker permission: ${rule.permission}`);
+  }
+
+  next();
+}));
 
 // ─────────────────────────────────────────────
 // GAME TYPES
@@ -121,6 +165,7 @@ const createSessionSchema = z.object({
 ownerRouter.post('/sessions', handleAsync(async (req: Request, res: Response) => {
   const { playerId, items, pointsToDeduct = 0 } = createSessionSchema.parse(req.body);
   const storeId = req.user!.storeId!;
+  const workerId = req.user!.role === 'worker' ? req.user!.id : undefined;
 
   // Verify player exists
   const player = await prisma.player.findUnique({ where: { id: playerId } });
@@ -179,6 +224,7 @@ ownerRouter.post('/sessions', handleAsync(async (req: Request, res: Response) =>
         pointsEarned,
         paidWithPoints: pointsToDeduct,
         isPaid: true,
+        workerId,
         items: {
           create: sessionItems,
         },
@@ -214,6 +260,7 @@ ownerRouter.get('/sessions', handleAsync(async (req: Request, res: Response) => 
     where,
     include: {
       player: { select: { id: true, name: true, username: true } },
+      worker: { select: { id: true, name: true, username: true } },
       items: { include: { gameType: { select: { name: true } } } },
     },
     orderBy: { createdAt: 'desc' },
@@ -227,6 +274,7 @@ ownerRouter.get('/sessions/:id', handleAsync(async (req: Request, res: Response)
     where: { id: String(req.params.id), storeId: req.user!.storeId! },
     include: {
       player: { select: { id: true, name: true, username: true } },
+      worker: { select: { id: true, name: true, username: true } },
       items: { include: { gameType: true } },
     },
   });
@@ -291,12 +339,25 @@ ownerRouter.put('/tier-config', handleAsync(async (req: Request, res: Response) 
 // PRODUCTS (SHOP)
 // ─────────────────────────────────────────────
 
-const productSchema = z.object({
+const productBaseSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
-  priceInPoints: z.number().int().positive(),
+  priceInPoints: z.number().int().positive().optional().nullable(),
   priceInDt: z.number().positive().optional().nullable(),
   imageUrl: z.string().optional(),
+});
+
+const productSchema = productBaseSchema.refine((data) => data.priceInPoints != null || data.priceInDt != null, {
+  message: 'Product must have a points price, a cash price, or both.',
+});
+
+const productUpdateSchema = productBaseSchema.partial().refine((data) => {
+  if ('priceInPoints' in data || 'priceInDt' in data) {
+    return data.priceInPoints != null || data.priceInDt != null;
+  }
+  return true;
+}, {
+  message: 'Product must have a points price, a cash price, or both.',
 });
 
 ownerRouter.get('/products', handleAsync(async (req: Request, res: Response) => {
@@ -316,7 +377,7 @@ ownerRouter.post('/products', handleAsync(async (req: Request, res: Response) =>
 }));
 
 ownerRouter.put('/products/:id', handleAsync(async (req: Request, res: Response) => {
-  const data = productSchema.partial().parse(req.body);
+  const data = productUpdateSchema.parse(req.body);
   const product = await prisma.product.update({
     where: { id: String(req.params.id) },
     data,
@@ -421,7 +482,8 @@ ownerRouter.post('/shop/confirm-cash-payment', handleAsync(async (req: Request, 
         productName: pendingOrder.product.name,
         pointsSpent: 0,
         cashSpent: order.amountDt,
-        pointsEarned: order.pointsToEarn
+        pointsEarned: order.pointsToEarn,
+        workerId: req.user!.role === 'worker' ? req.user!.id : undefined
       }
     });
 
@@ -512,6 +574,237 @@ ownerRouter.get('/reports/monthly', handleAsync(async (req: Request, res: Respon
 // ─────────────────────────────────────────────
 // TOURNAMENTS
 // ─────────────────────────────────────────────
+
+// WORKERS
+
+const workerPermissionInputSchema = z.record(z.string(), z.boolean());
+
+const workerCreateSchema = z.object({
+  username: z.string().min(3),
+  password: z.string().min(6),
+  name: z.string().min(2),
+  phone: z.string().optional().nullable(),
+  permissions: workerPermissionInputSchema.optional(),
+});
+
+const workerUpdateSchema = z.object({
+  password: z.string().min(6).optional(),
+  name: z.string().min(2).optional(),
+  phone: z.string().optional().nullable(),
+  isActive: z.boolean().optional(),
+  permissions: workerPermissionInputSchema.optional(),
+});
+
+function workerDateRanges() {
+  const now = new Date();
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
+  const weekStart = new Date(today);
+  weekStart.setDate(weekStart.getDate() - 6);
+
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  return { today, tomorrow, weekStart, monthStart };
+}
+
+function workerResponse(worker: any) {
+  return {
+    id: worker.id,
+    username: worker.username,
+    name: worker.name,
+    phone: worker.phone,
+    isActive: worker.isActive,
+    permissions: normalizeWorkerPermissions(worker.permissions),
+    createdAt: worker.createdAt,
+    updatedAt: worker.updatedAt,
+  };
+}
+
+async function assertUsernameAvailable(username: string) {
+  const [admin, player, worker] = await Promise.all([
+    prisma.admin.findUnique({ where: { username } }),
+    prisma.player.findUnique({ where: { username } }),
+    prisma.storeWorker.findUnique({ where: { username } }),
+  ]);
+
+  if (admin || player || worker) {
+    throw new AppError(400, 'Username already exists');
+  }
+}
+
+async function workerStatsForRange(storeId: string, workerId: string, from: Date, to?: Date, includeTransactions = false) {
+  const createdAt = to ? { gte: from, lt: to } : { gte: from };
+
+  const [sessions, purchases] = await Promise.all([
+    prisma.session.findMany({
+      where: { storeId, workerId, createdAt },
+      include: includeTransactions
+        ? {
+            player: { select: { id: true, name: true, username: true } },
+            items: { include: { gameType: { select: { name: true } } } },
+          }
+        : undefined,
+      orderBy: { createdAt: 'desc' },
+      take: includeTransactions ? 100 : undefined,
+    }),
+    prisma.purchase.findMany({
+      where: { storeId, workerId, createdAt },
+      include: includeTransactions
+        ? { player: { select: { id: true, name: true, username: true } } }
+        : undefined,
+      orderBy: { createdAt: 'desc' },
+      take: includeTransactions ? 100 : undefined,
+    }),
+  ]);
+
+  const sessionRevenue = sessions.reduce((sum: number, session: any) => sum + session.totalAmount, 0);
+  const purchaseRevenue = purchases.reduce((sum: number, purchase: any) => sum + (purchase.cashSpent ?? 0), 0);
+  const pointsEarned = sessions.reduce((sum: number, session: any) => sum + session.pointsEarned, 0)
+    + purchases.reduce((sum: number, purchase: any) => sum + (purchase.pointsEarned ?? 0), 0);
+  const pointsDeducted = sessions.reduce((sum: number, session: any) => sum + session.paidWithPoints, 0)
+    + purchases.reduce((sum: number, purchase: any) => sum + purchase.pointsSpent, 0);
+
+  const transactions = includeTransactions
+    ? [
+        ...sessions.map((session: any) => ({
+          id: session.id,
+          type: 'session',
+          player: session.player,
+          totalAmount: session.totalAmount,
+          pointsEarned: session.pointsEarned,
+          pointsDeducted: session.paidWithPoints,
+          items: session.items,
+          createdAt: session.createdAt,
+        })),
+        ...purchases.map((purchase: any) => ({
+          id: purchase.id,
+          type: 'purchase',
+          player: purchase.player,
+          productName: purchase.productName,
+          totalAmount: purchase.cashSpent ?? 0,
+          pointsEarned: purchase.pointsEarned ?? 0,
+          pointsDeducted: purchase.pointsSpent,
+          createdAt: purchase.createdAt,
+        })),
+      ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    : undefined;
+
+  return {
+    transactionCount: sessions.length + purchases.length,
+    sessionCount: sessions.length,
+    purchaseCount: purchases.length,
+    revenue: +(sessionRevenue + purchaseRevenue).toFixed(3),
+    pointsEarned,
+    pointsDeducted,
+    transactions,
+  };
+}
+
+async function workerPeriodStats(storeId: string, workerId: string, includeTransactions = false) {
+  const { today, tomorrow, weekStart, monthStart } = workerDateRanges();
+  const [daily, weekly, monthly] = await Promise.all([
+    workerStatsForRange(storeId, workerId, today, tomorrow, includeTransactions),
+    workerStatsForRange(storeId, workerId, weekStart, undefined, includeTransactions),
+    workerStatsForRange(storeId, workerId, monthStart, undefined, includeTransactions),
+  ]);
+  return { daily, weekly, monthly };
+}
+
+ownerRouter.get('/workers', handleAsync(async (req: Request, res: Response) => {
+  const storeId = req.user!.storeId!;
+  const workers = await prisma.storeWorker.findMany({
+    where: { storeId },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  const enrichedWorkers = await Promise.all(workers.map(async (worker: any) => ({
+    ...workerResponse(worker),
+    stats: await workerPeriodStats(storeId, worker.id),
+  })));
+
+  res.json(enrichedWorkers);
+}));
+
+ownerRouter.post('/workers', handleAsync(async (req: Request, res: Response) => {
+  const storeId = req.user!.storeId!;
+  const data = workerCreateSchema.parse(req.body);
+
+  await assertUsernameAvailable(data.username);
+
+  const worker = await prisma.storeWorker.create({
+    data: {
+      storeId,
+      createdByOwnerId: req.user!.id,
+      username: data.username,
+      passwordHash: await bcrypt.hash(data.password, 10),
+      name: data.name,
+      phone: data.phone ?? null,
+      permissions: normalizeWorkerPermissions(data.permissions ?? DEFAULT_WORKER_PERMISSIONS),
+    },
+  });
+
+  res.status(201).json(workerResponse(worker));
+}));
+
+ownerRouter.put('/workers/:id', handleAsync(async (req: Request, res: Response) => {
+  const storeId = req.user!.storeId!;
+  const workerId = String(req.params.id);
+  const data = workerUpdateSchema.parse(req.body);
+
+  const worker = await prisma.storeWorker.findFirst({ where: { id: workerId, storeId } });
+  if (!worker) throw new AppError(404, 'Worker not found');
+
+  const updateData: any = {};
+  if (data.name !== undefined) updateData.name = data.name;
+  if (data.phone !== undefined) updateData.phone = data.phone ?? null;
+  if (data.isActive !== undefined) updateData.isActive = data.isActive;
+  if (data.password) updateData.passwordHash = await bcrypt.hash(data.password, 10);
+  if (data.permissions) {
+    updateData.permissions = normalizeWorkerPermissions({
+      ...normalizeWorkerPermissions(worker.permissions),
+      ...data.permissions,
+    });
+  }
+
+  const updated = await prisma.storeWorker.update({
+    where: { id: workerId },
+    data: updateData,
+  });
+
+  res.json(workerResponse(updated));
+}));
+
+ownerRouter.delete('/workers/:id', handleAsync(async (req: Request, res: Response) => {
+  const storeId = req.user!.storeId!;
+  const workerId = String(req.params.id);
+
+  const worker = await prisma.storeWorker.findFirst({ where: { id: workerId, storeId } });
+  if (!worker) throw new AppError(404, 'Worker not found');
+
+  await prisma.storeWorker.update({
+    where: { id: workerId },
+    data: { isActive: false },
+  });
+
+  res.json({ success: true });
+}));
+
+ownerRouter.get('/workers/:id/stats', handleAsync(async (req: Request, res: Response) => {
+  const storeId = req.user!.storeId!;
+  const workerId = String(req.params.id);
+
+  const worker = await prisma.storeWorker.findFirst({ where: { id: workerId, storeId } });
+  if (!worker) throw new AppError(404, 'Worker not found');
+
+  res.json({
+    worker: workerResponse(worker),
+    stats: await workerPeriodStats(storeId, workerId, true),
+  });
+}));
 
 const prizeDistributionSchema = z.array(z.object({
   rank: z.number().int().min(1),

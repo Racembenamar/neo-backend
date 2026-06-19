@@ -39,6 +39,7 @@ model Player {
   matchesAsPlayer2 Match[]     @relation("Player2")
   pendingCashOrders PendingCashOrder[]
   notifications Notification[]
+  createdWorkers StoreWorker[] @relation("WorkerCreator")
   createdAt    DateTime      @default(now())
 
   @@map("players")
@@ -75,9 +76,31 @@ model Store {
   tournaments   Tournament[]
   notifications Notification[]
   pendingCashOrders PendingCashOrder[]
+  workers       StoreWorker[]
   createdAt     DateTime           @default(now())
 
   @@map("stores")
+}
+
+model StoreWorker {
+  id               String     @id @default(uuid())
+  store            Store      @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  storeId          String
+  createdByOwner   Player     @relation("WorkerCreator", fields: [createdByOwnerId], references: [id], onDelete: Cascade)
+  createdByOwnerId String
+  username         String     @unique
+  passwordHash     String
+  name             String
+  phone            String?
+  permissions      Json
+  isActive         Boolean    @default(true)
+  sessions         Session[]
+  purchases        Purchase[]
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  @@index([storeId])
+  @@map("store_workers")
 }
 
 model PlayerStore {
@@ -141,6 +164,8 @@ model Session {
   paidWithPoints Int           @default(0)
   isPaid         Boolean       @default(false)
   syncedAt       DateTime?
+  worker         StoreWorker?  @relation(fields: [workerId], references: [id], onDelete: SetNull)
+  workerId       String?
   createdAt      DateTime      @default(now())
 
   @@map("sessions")
@@ -156,6 +181,8 @@ model Purchase {
   pointsSpent   Int
   cashSpent     Float?
   pointsEarned  Int?
+  worker        StoreWorker? @relation(fields: [workerId], references: [id], onDelete: SetNull)
+  workerId      String?
   createdAt     DateTime @default(now())
 
   @@map("purchases")
@@ -194,7 +221,7 @@ model Product {
   storeId       String
   name          String
   description   String?
-  priceInPoints Int
+  priceInPoints Int?
   priceInDt     Float?
   imageUrl      String?
   isActive      Boolean  @default(true)
