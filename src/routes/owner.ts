@@ -29,6 +29,26 @@ const WORKER_ROUTE_RULES: Array<{ method: string; pattern: RegExp; permission: W
   { method: 'GET', pattern: /^\/scan-player\/[^/]+$/, permission: 'canScanPlayer' },
   { method: 'POST', pattern: /^\/sessions$/, permission: 'canConfirmBilling' },
   { method: 'POST', pattern: /^\/shop\/confirm-cash-payment$/, permission: 'canConfirmBilling' },
+  { method: 'GET', pattern: /^\/reports\/daily$/, permission: 'canViewReports' },
+  { method: 'GET', pattern: /^\/reports\/weekly$/, permission: 'canViewReports' },
+  { method: 'GET', pattern: /^\/reports\/monthly$/, permission: 'canViewReports' },
+  { method: 'GET', pattern: /^\/tournaments$/, permission: 'canViewTournaments' },
+  { method: 'POST', pattern: /^\/tournaments$/, permission: 'canCreateTournament' },
+  { method: 'PUT', pattern: /^\/tournaments\/[^/]+$/, permission: 'canEditTournament' },
+  { method: 'DELETE', pattern: /^\/tournaments\/[^/]+$/, permission: 'canDeleteTournament' },
+  { method: 'PATCH', pattern: /^\/tournaments\/[^/]+\/toggle$/, permission: 'canEnableDisableTournament' },
+  { method: 'PUT', pattern: /^\/tournaments\/[^/]+\/participants\/[^/]+$/, permission: 'canManageParticipants' },
+  { method: 'POST', pattern: /^\/tournaments\/[^/]+\/start$/, permission: 'canStartTournament' },
+  { method: 'GET', pattern: /^\/tournaments\/[^/]+\/matches$/, permission: 'canViewTournaments' },
+  { method: 'GET', pattern: /^\/tournaments\/[^/]+\/standings$/, permission: 'canViewTournaments' },
+  { method: 'PUT', pattern: /^\/tournaments\/[^/]+\/matches\/[^/]+\/score$/, permission: 'canManageScorecard' },
+  { method: 'PUT', pattern: /^\/tournaments\/[^/]+\/matches\/[^/]+\/status$/, permission: 'canManageMatches' },
+  { method: 'PUT', pattern: /^\/tournaments\/[^/]+\/matches\/[^/]+\/poster$/, permission: 'canManageMatches' },
+  { method: 'PUT', pattern: /^\/matches\/[^/]+\/schedule$/, permission: 'canScheduleTournament' },
+  { method: 'DELETE', pattern: /^\/matches\/[^/]+\/schedule$/, permission: 'canScheduleTournament' },
+  { method: 'PUT', pattern: /^\/tournaments\/[^/]+\/blocked-slots$/, permission: 'canScheduleTournament' },
+  { method: 'GET', pattern: /^\/tournaments\/[^/]+\/replacement-candidates$/, permission: 'canManageParticipants' },
+  { method: 'PUT', pattern: /^\/tournaments\/[^/]+\/replace-player$/, permission: 'canManageParticipants' },
 ];
 
 ownerRouter.use(handleAsync(async (req: Request, res: Response, next: NextFunction) => {
@@ -497,78 +517,114 @@ ownerRouter.post('/shop/confirm-cash-payment', handleAsync(async (req: Request, 
 // REPORTS
 // ─────────────────────────────────────────────
 
+async function buildStoreReport(storeId: string, from: Date, to?: Date) {
+  const createdAt = to ? { gte: from, lt: to } : { gte: from };
+  const tierConfig = await prisma.tierConfig.findUnique({ where: { storeId } });
+  const pointsPerDt = tierConfig?.pointsPerDt || 50;
+
+  const [sessions, purchases] = await Promise.all([
+    prisma.session.findMany({
+      where: { storeId, createdAt },
+      include: { items: { include: { gameType: { select: { name: true } } } } },
+    }),
+    prisma.purchase.findMany({
+      where: { storeId, createdAt },
+    }),
+  ]);
+
+  const byDay: Record<string, { cashRevenue: number; pointsValue: number; serviceValue: number }> = {};
+  const topGames: Record<string, { name: string; count: number; revenue: number; serviceValue: number }> = {};
+
+  let sessionCashRevenue = 0;
+  let sessionPointsValue = 0;
+  let sessionServiceValue = 0;
+
+  sessions.forEach((session: any) => {
+    const day = session.createdAt.toISOString().split('T')[0];
+    const pointsValue = Math.min(session.totalAmount, (session.paidWithPoints ?? 0) / pointsPerDt);
+    const cashRevenue = Math.max(0, session.totalAmount - pointsValue);
+    sessionServiceValue += session.totalAmount;
+    sessionPointsValue += pointsValue;
+    sessionCashRevenue += cashRevenue;
+
+    if (!byDay[day]) byDay[day] = { cashRevenue: 0, pointsValue: 0, serviceValue: 0 };
+    byDay[day].cashRevenue += cashRevenue;
+    byDay[day].pointsValue += pointsValue;
+    byDay[day].serviceValue += session.totalAmount;
+
+    session.items.forEach((item: any) => {
+      const name = item.gameType.name;
+      if (!topGames[name]) topGames[name] = { name, count: 0, revenue: 0, serviceValue: 0 };
+      topGames[name].count += 1;
+      topGames[name].revenue += item.subtotal;
+      topGames[name].serviceValue += item.subtotal;
+    });
+  });
+
+  const purchaseCashRevenue = purchases.reduce((sum: number, purchase: any) => sum + (purchase.cashSpent ?? 0), 0);
+  const purchasePointsValue = purchases.reduce((sum: number, purchase: any) => sum + ((purchase.pointsSpent ?? 0) / pointsPerDt), 0);
+  const purchaseServiceValue = purchaseCashRevenue + purchasePointsValue;
+
+  const pointsEarned = sessions.reduce((sum: number, session: any) => sum + session.pointsEarned, 0)
+    + purchases.reduce((sum: number, purchase: any) => sum + (purchase.pointsEarned ?? 0), 0);
+  const pointsDeducted = sessions.reduce((sum: number, session: any) => sum + session.paidWithPoints, 0)
+    + purchases.reduce((sum: number, purchase: any) => sum + purchase.pointsSpent, 0);
+
+  return {
+    totalRevenue: +(sessionCashRevenue + purchaseCashRevenue).toFixed(3),
+    cashRevenue: +(sessionCashRevenue + purchaseCashRevenue).toFixed(3),
+    pointsValue: +(sessionPointsValue + purchasePointsValue).toFixed(3),
+    serviceValue: +(sessionServiceValue + purchaseServiceValue).toFixed(3),
+    pointsEarned,
+    pointsDeducted,
+    sessionCount: sessions.length,
+    purchaseCount: purchases.length,
+    transactionCount: sessions.length + purchases.length,
+    topGames: Object.values(topGames)
+      .map(game => ({
+        ...game,
+        revenue: +game.revenue.toFixed(3),
+        serviceValue: +game.serviceValue.toFixed(3),
+      }))
+      .sort((a, b) => b.serviceValue - a.serviceValue),
+    dailyBreakdown: Object.entries(byDay)
+      .map(([date, values]) => ({
+        date,
+        cashRevenue: +values.cashRevenue.toFixed(3),
+        pointsValue: +values.pointsValue.toFixed(3),
+        serviceValue: +values.serviceValue.toFixed(3),
+        revenue: +values.cashRevenue.toFixed(3),
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date)),
+  };
+}
+
 ownerRouter.get('/reports/daily', handleAsync(async (req: Request, res: Response) => {
   const storeId = req.user!.storeId!;
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const tomorrow = new Date(today);
   tomorrow.setDate(tomorrow.getDate() + 1);
+  const report = await buildStoreReport(storeId, today, tomorrow);
+  res.json({ date: today.toISOString().split('T')[0], ...report });
+}));
 
-  const sessions = await prisma.session.findMany({
-    where: { storeId, createdAt: { gte: today, lt: tomorrow } },
-    include: { items: { include: { gameType: { select: { name: true } } } } },
-  });
-
-  const totalRevenue = sessions.reduce((sum: number, s: { totalAmount: number }) => sum + s.totalAmount, 0);
-  const sessionCount = sessions.length;
-
-  // Game popularity
-  const gameCounts: Record<string, { name: string; count: number; revenue: number }> = {};
-  sessions.forEach((s: { items: Array<{ gameType: { name: string }; subtotal: number }> }) => {
-    s.items.forEach((item: { gameType: { name: string }; subtotal: number }) => {
-      const name = item.gameType.name;
-      if (!gameCounts[name]) gameCounts[name] = { name, count: 0, revenue: 0 };
-      gameCounts[name].count += 1;
-      gameCounts[name].revenue += item.subtotal;
-    });
-  });
-
-  res.json({
-    date: today.toISOString().split('T')[0],
-    totalRevenue: +totalRevenue.toFixed(3),
-    sessionCount,
-    topGames: Object.values(gameCounts).sort((a, b) => b.count - a.count),
-  });
+ownerRouter.get('/reports/weekly', handleAsync(async (req: Request, res: Response) => {
+  const storeId = req.user!.storeId!;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const weekStart = new Date(today);
+  weekStart.setDate(weekStart.getDate() - 6);
+  const report = await buildStoreReport(storeId, weekStart);
+  res.json({ weekStart: weekStart.toISOString().split('T')[0], ...report });
 }));
 
 ownerRouter.get('/reports/monthly', handleAsync(async (req: Request, res: Response) => {
   const storeId = req.user!.storeId!;
   const now = new Date();
   const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-
-  const sessions = await prisma.session.findMany({
-    where: { storeId, createdAt: { gte: firstOfMonth } },
-    include: { items: { include: { gameType: { select: { name: true } } } } },
-  });
-
-  // Group by day
-  const byDay: Record<string, number> = {};
-  sessions.forEach((s: any) => {
-    const day = s.createdAt.toISOString().split('T')[0];
-    byDay[day] = (byDay[day] || 0) + s.totalAmount;
-  });
-
-  const totalRevenue = sessions.reduce((sum: number, s: any) => sum + s.totalAmount, 0);
-
-  // Game popularity for the month
-  const gameCounts: Record<string, { name: string; count: number; revenue: number }> = {};
-  sessions.forEach((s: any) => {
-    s.items.forEach((item: any) => {
-      const name = item.gameType.name;
-      if (!gameCounts[name]) gameCounts[name] = { name, count: 0, revenue: 0 };
-      gameCounts[name].count += 1;
-      gameCounts[name].revenue += item.subtotal;
-    });
-  });
-  res.json({
-    month: firstOfMonth.toISOString().split('T')[0].slice(0, 7),
-    totalRevenue: +totalRevenue.toFixed(3),
-    sessionCount: sessions.length,
-    topGames: Object.values(gameCounts).sort((a, b) => b.revenue - a.revenue),
-    dailyBreakdown: Object.entries(byDay)
-      .map(([date, revenue]) => ({ date, revenue: +revenue.toFixed(3) }))
-      .sort((a, b) => a.date.localeCompare(b.date)),
-  });
+  const report = await buildStoreReport(storeId, firstOfMonth);
+  res.json({ month: firstOfMonth.toISOString().split('T')[0].slice(0, 7), ...report });
 }));
 
 // ─────────────────────────────────────────────
@@ -636,7 +692,7 @@ async function assertUsernameAvailable(username: string) {
   }
 }
 
-async function workerStatsForRange(storeId: string, workerId: string, from: Date, to?: Date, includeTransactions = false) {
+async function workerStatsForRange(storeId: string, workerId: string, from: Date, to?: Date, includeTransactions = false, pointsPerDt = 50) {
   const createdAt = to ? { gte: from, lt: to } : { gte: from };
 
   const [sessions, purchases] = await Promise.all([
@@ -661,8 +717,20 @@ async function workerStatsForRange(storeId: string, workerId: string, from: Date
     }),
   ]);
 
-  const sessionRevenue = sessions.reduce((sum: number, session: any) => sum + session.totalAmount, 0);
-  const purchaseRevenue = purchases.reduce((sum: number, purchase: any) => sum + (purchase.cashSpent ?? 0), 0);
+  const sessionServiceValue = sessions.reduce((sum: number, session: any) => sum + session.totalAmount, 0);
+  const sessionPointsValue = sessions.reduce((sum: number, session: any) => {
+    const value = (session.paidWithPoints ?? 0) / pointsPerDt;
+    return sum + Math.min(session.totalAmount, value);
+  }, 0);
+  const sessionCashRevenue = sessions.reduce((sum: number, session: any) => {
+    const value = (session.paidWithPoints ?? 0) / pointsPerDt;
+    return sum + Math.max(0, session.totalAmount - value);
+  }, 0);
+
+  const purchaseCashRevenue = purchases.reduce((sum: number, purchase: any) => sum + (purchase.cashSpent ?? 0), 0);
+  const purchasePointsValue = purchases.reduce((sum: number, purchase: any) => sum + ((purchase.pointsSpent ?? 0) / pointsPerDt), 0);
+  const purchaseServiceValue = purchaseCashRevenue + purchasePointsValue;
+
   const pointsEarned = sessions.reduce((sum: number, session: any) => sum + session.pointsEarned, 0)
     + purchases.reduce((sum: number, purchase: any) => sum + (purchase.pointsEarned ?? 0), 0);
   const pointsDeducted = sessions.reduce((sum: number, session: any) => sum + session.paidWithPoints, 0)
@@ -675,6 +743,8 @@ async function workerStatsForRange(storeId: string, workerId: string, from: Date
           type: 'session',
           player: session.player,
           totalAmount: session.totalAmount,
+          cashAmount: +Math.max(0, session.totalAmount - ((session.paidWithPoints ?? 0) / pointsPerDt)).toFixed(3),
+          pointsValue: +Math.min(session.totalAmount, ((session.paidWithPoints ?? 0) / pointsPerDt)).toFixed(3),
           pointsEarned: session.pointsEarned,
           pointsDeducted: session.paidWithPoints,
           items: session.items,
@@ -685,7 +755,9 @@ async function workerStatsForRange(storeId: string, workerId: string, from: Date
           type: 'purchase',
           player: purchase.player,
           productName: purchase.productName,
-          totalAmount: purchase.cashSpent ?? 0,
+          totalAmount: (purchase.cashSpent ?? 0) + ((purchase.pointsSpent ?? 0) / pointsPerDt),
+          cashAmount: purchase.cashSpent ?? 0,
+          pointsValue: (purchase.pointsSpent ?? 0) / pointsPerDt,
           pointsEarned: purchase.pointsEarned ?? 0,
           pointsDeducted: purchase.pointsSpent,
           createdAt: purchase.createdAt,
@@ -697,7 +769,10 @@ async function workerStatsForRange(storeId: string, workerId: string, from: Date
     transactionCount: sessions.length + purchases.length,
     sessionCount: sessions.length,
     purchaseCount: purchases.length,
-    revenue: +(sessionRevenue + purchaseRevenue).toFixed(3),
+    revenue: +(sessionCashRevenue + purchaseCashRevenue).toFixed(3),
+    cashRevenue: +(sessionCashRevenue + purchaseCashRevenue).toFixed(3),
+    pointsValue: +(sessionPointsValue + purchasePointsValue).toFixed(3),
+    serviceValue: +(sessionServiceValue + purchaseServiceValue).toFixed(3),
     pointsEarned,
     pointsDeducted,
     transactions,
@@ -706,10 +781,12 @@ async function workerStatsForRange(storeId: string, workerId: string, from: Date
 
 async function workerPeriodStats(storeId: string, workerId: string, includeTransactions = false) {
   const { today, tomorrow, weekStart, monthStart } = workerDateRanges();
+  const tierConfig = await prisma.tierConfig.findUnique({ where: { storeId } });
+  const pointsPerDt = tierConfig?.pointsPerDt || 50;
   const [daily, weekly, monthly] = await Promise.all([
-    workerStatsForRange(storeId, workerId, today, tomorrow, includeTransactions),
-    workerStatsForRange(storeId, workerId, weekStart, undefined, includeTransactions),
-    workerStatsForRange(storeId, workerId, monthStart, undefined, includeTransactions),
+    workerStatsForRange(storeId, workerId, today, tomorrow, includeTransactions, pointsPerDt),
+    workerStatsForRange(storeId, workerId, weekStart, undefined, includeTransactions, pointsPerDt),
+    workerStatsForRange(storeId, workerId, monthStart, undefined, includeTransactions, pointsPerDt),
   ]);
   return { daily, weekly, monthly };
 }
