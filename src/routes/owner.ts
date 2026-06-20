@@ -28,6 +28,9 @@ const WORKER_ROUTE_RULES: Array<{ method: string; pattern: RegExp; permission: W
   { method: 'GET', pattern: /^\/tier-config$/, permission: 'canAccessNewSession' },
   { method: 'GET', pattern: /^\/scan-player\/[^/]+$/, permission: 'canScanPlayer' },
   { method: 'POST', pattern: /^\/sessions$/, permission: 'canConfirmBilling' },
+  { method: 'GET', pattern: /^\/credits$/, permission: 'canViewCredits' },
+  { method: 'GET', pattern: /^\/credits\/player\/[^/]+$/, permission: 'canViewCredits' },
+  { method: 'POST', pattern: /^\/credits\/payments$/, permission: 'canCollectCreditPayments' },
   { method: 'POST', pattern: /^\/shop\/confirm-cash-payment$/, permission: 'canConfirmBilling' },
   { method: 'GET', pattern: /^\/reports\/daily$/, permission: 'canViewReports' },
   { method: 'GET', pattern: /^\/reports\/weekly$/, permission: 'canViewReports' },
@@ -157,11 +160,14 @@ ownerRouter.get('/scan-player/:playerId', handleAsync(async (req: Request, res: 
     orderBy: { createdAt: 'desc' }
   });
 
+  const creditBalance = await getPlayerCreditBalance(storeId, player.id);
+
   res.json({
     player,
     totalPoints: link?.totalPoints ?? 0,
     tier: link?.tier ?? 1,
     isFirstVisit: !link,
+    creditBalance,
     pendingOrder
   });
 }));
@@ -180,12 +186,40 @@ const createSessionSchema = z.object({
   playerId: z.string().min(1),
   items: z.array(sessionItemSchema).min(1),
   pointsToDeduct: z.number().int().nonnegative().optional(), // direct deduction, no QR needed
+  paymentMethod: z.enum(['cash', 'points', 'credit']).optional(),
 });
 
+function creditDelta(tx: { type: string; amountDt: number }) {
+  return tx.type === 'payment' ? -tx.amountDt : tx.amountDt;
+}
+
+async function getPlayerCreditBalance(storeId: string, playerId: string) {
+  const transactions = await prisma.creditTransaction.findMany({
+    where: { storeId, playerId },
+    select: { type: true, amountDt: true },
+  });
+
+  return +transactions.reduce((sum: number, tx: { type: string; amountDt: number }) => sum + creditDelta(tx), 0).toFixed(3);
+}
+
 ownerRouter.post('/sessions', handleAsync(async (req: Request, res: Response) => {
-  const { playerId, items, pointsToDeduct = 0 } = createSessionSchema.parse(req.body);
+  const { playerId, items, pointsToDeduct = 0, paymentMethod = 'cash' } = createSessionSchema.parse(req.body);
   const storeId = req.user!.storeId!;
   const workerId = req.user!.role === 'worker' ? req.user!.id : undefined;
+
+  if (paymentMethod === 'credit' && pointsToDeduct > 0) {
+    throw new AppError(400, 'Credit sessions cannot also deduct points');
+  }
+  if (req.user!.role === 'worker' && paymentMethod === 'credit') {
+    const worker = await prisma.storeWorker.findUnique({
+      where: { id: req.user!.id },
+      select: { permissions: true },
+    });
+    const permissions = normalizeWorkerPermissions(worker?.permissions);
+    if (!permissions.canAddSessionCredit) {
+      throw new AppError(403, 'Missing worker permission: canAddSessionCredit');
+    }
+  }
 
   // Verify player exists
   const player = await prisma.player.findUnique({ where: { id: playerId } });
@@ -230,6 +264,21 @@ ownerRouter.post('/sessions', handleAsync(async (req: Request, res: Response) =>
   });
 
   const totalAmount = +sessionItems.reduce((sum, i) => sum + i.subtotal, 0).toFixed(3);
+  const maxUsablePoints = Math.ceil(totalAmount * tierConfig.pointsPerDt);
+  if (pointsToDeduct > maxUsablePoints) {
+    throw new AppError(400, `This bill only needs up to ${maxUsablePoints} pts`);
+  }
+
+  const pointsValue = +Math.min(totalAmount, pointsToDeduct / tierConfig.pointsPerDt).toFixed(3);
+  const creditAmount = paymentMethod === 'credit' ? totalAmount : 0;
+  const cashAmount = paymentMethod === 'credit' ? 0 : +Math.max(0, totalAmount - pointsValue).toFixed(3);
+  const normalizedPaymentMethod =
+    paymentMethod === 'credit'
+      ? 'credit'
+      : pointsToDeduct > 0
+        ? cashAmount > 0 ? 'cash_points' : 'points'
+        : 'cash';
+
   const pointsEarned = calculatePointsEarned(totalAmount, playerLink.tier, tierConfig);
   const newTotalPoints = playerLink.totalPoints + pointsEarned - pointsToDeduct;
   const pendingUpgrade = checkPendingUpgrade(newTotalPoints, playerLink.tier, tierConfig);
@@ -241,9 +290,12 @@ ownerRouter.post('/sessions', handleAsync(async (req: Request, res: Response) =>
         storeId,
         playerId,
         totalAmount,
+        cashAmount,
+        creditAmount,
+        paymentMethod: normalizedPaymentMethod,
         pointsEarned,
         paidWithPoints: pointsToDeduct,
-        isPaid: true,
+        isPaid: creditAmount <= 0,
         workerId,
         items: {
           create: sessionItems,
@@ -257,10 +309,55 @@ ownerRouter.post('/sessions', handleAsync(async (req: Request, res: Response) =>
       data: { totalPoints: newTotalPoints, pendingUpgrade },
     });
 
+    if (creditAmount > 0) {
+      await tx.creditTransaction.create({
+        data: {
+          storeId,
+          playerId,
+          workerId,
+          sessionId: s.id,
+          type: 'charge',
+          amountDt: creditAmount,
+          note: 'Session added to player credit',
+        },
+      });
+    }
+
     return s;
   });
 
-  res.status(201).json({ session, newTotalPoints, pointsEarned, pointsDeducted: pointsToDeduct, pendingUpgrade });
+  const creditBalance = await getPlayerCreditBalance(storeId, playerId);
+
+  if (creditAmount > 0) {
+    try {
+      await sendPushNotification(
+        playerId,
+        'Credit Added',
+        `${creditAmount.toFixed(2)} DT was added to your credit. Current balance: ${creditBalance.toFixed(2)} DT.`,
+        {
+          type: 'credit_added',
+          storeId,
+          sessionId: session.id,
+          amountDt: creditAmount,
+          balanceDt: creditBalance,
+        },
+      );
+    } catch (err) {
+      console.error('Error sending credit added notification:', err);
+    }
+  }
+
+  res.status(201).json({
+    session,
+    newTotalPoints,
+    pointsEarned,
+    pointsDeducted: pointsToDeduct,
+    pendingUpgrade,
+    creditBalance,
+    cashAmount,
+    creditAmount,
+    paymentMethod: normalizedPaymentMethod,
+  });
 }));
 
 
@@ -302,6 +399,138 @@ ownerRouter.get('/sessions/:id', handleAsync(async (req: Request, res: Response)
   res.json(session);
 }));
 
+// CREDIT LEDGER
+
+const creditPaymentSchema = z.object({
+  playerId: z.string().min(1),
+  amountDt: z.number().positive(),
+  note: z.string().max(200).optional(),
+});
+
+ownerRouter.get('/credits', handleAsync(async (req: Request, res: Response) => {
+  const storeId = req.user!.storeId!;
+  const transactions = await prisma.creditTransaction.findMany({
+    where: { storeId },
+    include: {
+      player: { select: { id: true, name: true, username: true, phone: true } },
+      worker: { select: { id: true, name: true, username: true } },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  const players = new Map<string, any>();
+  for (const tx of transactions) {
+    const existing = players.get(tx.playerId) ?? {
+      player: tx.player,
+      balance: 0,
+      creditAdded: 0,
+      creditPaid: 0,
+      transactionCount: 0,
+      lastTransactionAt: tx.createdAt,
+      lastWorker: tx.worker,
+    };
+
+    existing.balance += creditDelta(tx);
+    existing.transactionCount += 1;
+    if (tx.type === 'payment') existing.creditPaid += tx.amountDt;
+    else existing.creditAdded += tx.amountDt;
+
+    if (new Date(tx.createdAt).getTime() > new Date(existing.lastTransactionAt).getTime()) {
+      existing.lastTransactionAt = tx.createdAt;
+      existing.lastWorker = tx.worker;
+    }
+
+    players.set(tx.playerId, existing);
+  }
+
+  res.json(Array.from(players.values())
+    .map(playerCredit => ({
+      ...playerCredit,
+      balance: +playerCredit.balance.toFixed(3),
+      creditAdded: +playerCredit.creditAdded.toFixed(3),
+      creditPaid: +playerCredit.creditPaid.toFixed(3),
+    }))
+    .filter(playerCredit => Math.abs(playerCredit.balance) > 0.0001)
+    .sort((a, b) => b.balance - a.balance));
+}));
+
+ownerRouter.get('/credits/player/:playerId', handleAsync(async (req: Request, res: Response) => {
+  const storeId = req.user!.storeId!;
+  const playerId = String(req.params.playerId);
+  const player = await prisma.player.findUnique({
+    where: { id: playerId },
+    select: { id: true, name: true, username: true, phone: true },
+  });
+  if (!player) throw new AppError(404, 'Player not found');
+
+  const transactions = await prisma.creditTransaction.findMany({
+    where: { storeId, playerId },
+    include: {
+      worker: { select: { id: true, name: true, username: true } },
+      session: { select: { id: true, totalAmount: true, paymentMethod: true } },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  const balance = +transactions.reduce((sum: number, tx: { type: string; amountDt: number }) => sum + creditDelta(tx), 0).toFixed(3);
+  res.json({ player, balance, transactions });
+}));
+
+ownerRouter.post('/credits/payments', handleAsync(async (req: Request, res: Response) => {
+  const storeId = req.user!.storeId!;
+  const workerId = req.user!.role === 'worker' ? req.user!.id : undefined;
+  const data = creditPaymentSchema.parse(req.body);
+
+  const player = await prisma.player.findUnique({
+    where: { id: data.playerId },
+    select: { id: true, name: true, username: true },
+  });
+  if (!player) throw new AppError(404, 'Player not found');
+
+  const balance = await getPlayerCreditBalance(storeId, data.playerId);
+  if (balance <= 0) {
+    throw new AppError(400, 'This player has no unpaid credit');
+  }
+  if (data.amountDt > balance) {
+    throw new AppError(400, `Payment is higher than current credit balance (${balance.toFixed(2)} DT)`);
+  }
+
+  const transaction = await prisma.creditTransaction.create({
+    data: {
+      storeId,
+      playerId: data.playerId,
+      workerId,
+      type: 'payment',
+      amountDt: +data.amountDt.toFixed(3),
+      note: data.note ?? 'Credit payment collected',
+    },
+  });
+  const newBalance = +(balance - data.amountDt).toFixed(3);
+
+  try {
+    await sendPushNotification(
+      data.playerId,
+      newBalance <= 0 ? 'Credit Fully Paid' : 'Credit Payment Received',
+      newBalance <= 0
+        ? `${data.amountDt.toFixed(2)} DT was paid. Your credit balance is now clear.`
+        : `${data.amountDt.toFixed(2)} DT was paid from your credit. Remaining balance: ${newBalance.toFixed(2)} DT.`,
+      {
+        type: 'credit_paid',
+        storeId,
+        amountDt: +data.amountDt.toFixed(3),
+        balanceDt: newBalance,
+      },
+    );
+  } catch (err) {
+    console.error('Error sending credit payment notification:', err);
+  }
+
+  res.status(201).json({
+    transaction,
+    player,
+    balance: newBalance,
+  });
+}));
 
 
 
@@ -517,12 +746,31 @@ ownerRouter.post('/shop/confirm-cash-payment', handleAsync(async (req: Request, 
 // REPORTS
 // ─────────────────────────────────────────────
 
+function sessionPointsValue(session: any, pointsPerDt: number) {
+  return +Math.min(session.totalAmount, (session.paidWithPoints ?? 0) / pointsPerDt).toFixed(3);
+}
+
+function sessionCreditValue(session: any) {
+  if (session.paymentMethod === 'credit') {
+    return +(session.creditAmount || session.totalAmount || 0).toFixed(3);
+  }
+  return +(session.creditAmount ?? 0).toFixed(3);
+}
+
+function sessionCashValue(session: any, pointsPerDt: number) {
+  if (session.paymentMethod === 'credit') return 0;
+  if ((session.cashAmount ?? 0) > 0) return +session.cashAmount.toFixed(3);
+
+  const pointsValue = sessionPointsValue(session, pointsPerDt);
+  return +Math.max(0, session.totalAmount - pointsValue).toFixed(3);
+}
+
 async function buildStoreReport(storeId: string, from: Date, to?: Date) {
   const createdAt = to ? { gte: from, lt: to } : { gte: from };
   const tierConfig = await prisma.tierConfig.findUnique({ where: { storeId } });
   const pointsPerDt = tierConfig?.pointsPerDt || 50;
 
-  const [sessions, purchases] = await Promise.all([
+  const [sessions, purchases, creditTransactions, allCreditTransactions] = await Promise.all([
     prisma.session.findMany({
       where: { storeId, createdAt },
       include: { items: { include: { gameType: { select: { name: true } } } } },
@@ -530,27 +778,37 @@ async function buildStoreReport(storeId: string, from: Date, to?: Date) {
     prisma.purchase.findMany({
       where: { storeId, createdAt },
     }),
+    prisma.creditTransaction.findMany({
+      where: { storeId, createdAt },
+    }),
+    prisma.creditTransaction.findMany({
+      where: { storeId },
+      select: { type: true, amountDt: true },
+    }),
   ]);
 
-  const byDay: Record<string, { cashRevenue: number; pointsValue: number; serviceValue: number }> = {};
+  const byDay: Record<string, { cashRevenue: number; pointsValue: number; serviceValue: number; creditAdded: number; creditPaid: number }> = {};
   const topGames: Record<string, { name: string; count: number; revenue: number; serviceValue: number }> = {};
 
   let sessionCashRevenue = 0;
-  let sessionPointsValue = 0;
+  let sessionPointsTotal = 0;
   let sessionServiceValue = 0;
 
   sessions.forEach((session: any) => {
     const day = session.createdAt.toISOString().split('T')[0];
-    const pointsValue = Math.min(session.totalAmount, (session.paidWithPoints ?? 0) / pointsPerDt);
-    const cashRevenue = Math.max(0, session.totalAmount - pointsValue);
+    const pointsValue = sessionPointsValue(session, pointsPerDt);
+    const cashRevenue = sessionCashValue(session, pointsPerDt);
+    const creditAdded = sessionCreditValue(session);
+
     sessionServiceValue += session.totalAmount;
-    sessionPointsValue += pointsValue;
+    sessionPointsTotal += pointsValue;
     sessionCashRevenue += cashRevenue;
 
-    if (!byDay[day]) byDay[day] = { cashRevenue: 0, pointsValue: 0, serviceValue: 0 };
+    if (!byDay[day]) byDay[day] = { cashRevenue: 0, pointsValue: 0, serviceValue: 0, creditAdded: 0, creditPaid: 0 };
     byDay[day].cashRevenue += cashRevenue;
     byDay[day].pointsValue += pointsValue;
     byDay[day].serviceValue += session.totalAmount;
+    byDay[day].creditAdded += creditAdded;
 
     session.items.forEach((item: any) => {
       const name = item.gameType.name;
@@ -564,6 +822,27 @@ async function buildStoreReport(storeId: string, from: Date, to?: Date) {
   const purchaseCashRevenue = purchases.reduce((sum: number, purchase: any) => sum + (purchase.cashSpent ?? 0), 0);
   const purchasePointsValue = purchases.reduce((sum: number, purchase: any) => sum + ((purchase.pointsSpent ?? 0) / pointsPerDt), 0);
   const purchaseServiceValue = purchaseCashRevenue + purchasePointsValue;
+  const creditPaid = creditTransactions
+    .filter((tx: any) => tx.type === 'payment')
+    .reduce((sum: number, tx: any) => sum + (tx.amountDt ?? 0), 0);
+  const creditAdded = creditTransactions
+    .filter((tx: any) => tx.type !== 'payment')
+    .reduce((sum: number, tx: any) => sum + (tx.amountDt ?? 0), 0);
+  const outstandingCredit = allCreditTransactions.reduce(
+    (sum: number, tx: { type: string; amountDt: number }) => sum + creditDelta(tx),
+    0,
+  );
+
+  creditTransactions.forEach((tx: any) => {
+    const day = tx.createdAt.toISOString().split('T')[0];
+    if (!byDay[day]) byDay[day] = { cashRevenue: 0, pointsValue: 0, serviceValue: 0, creditAdded: 0, creditPaid: 0 };
+    if (tx.type === 'payment') {
+      byDay[day].cashRevenue += tx.amountDt;
+      byDay[day].creditPaid += tx.amountDt;
+    } else {
+      byDay[day].creditAdded += tx.amountDt;
+    }
+  });
 
   const pointsEarned = sessions.reduce((sum: number, session: any) => sum + session.pointsEarned, 0)
     + purchases.reduce((sum: number, purchase: any) => sum + (purchase.pointsEarned ?? 0), 0);
@@ -571,15 +850,20 @@ async function buildStoreReport(storeId: string, from: Date, to?: Date) {
     + purchases.reduce((sum: number, purchase: any) => sum + purchase.pointsSpent, 0);
 
   return {
-    totalRevenue: +(sessionCashRevenue + purchaseCashRevenue).toFixed(3),
-    cashRevenue: +(sessionCashRevenue + purchaseCashRevenue).toFixed(3),
-    pointsValue: +(sessionPointsValue + purchasePointsValue).toFixed(3),
+    totalRevenue: +(sessionCashRevenue + purchaseCashRevenue + creditPaid).toFixed(3),
+    cashRevenue: +(sessionCashRevenue + purchaseCashRevenue + creditPaid).toFixed(3),
+    pointsValue: +(sessionPointsTotal + purchasePointsValue).toFixed(3),
     serviceValue: +(sessionServiceValue + purchaseServiceValue).toFixed(3),
+    creditAdded: +creditAdded.toFixed(3),
+    creditPaid: +creditPaid.toFixed(3),
+    outstandingCredit: +outstandingCredit.toFixed(3),
     pointsEarned,
     pointsDeducted,
     sessionCount: sessions.length,
     purchaseCount: purchases.length,
-    transactionCount: sessions.length + purchases.length,
+    creditSessionCount: sessions.filter((session: any) => sessionCreditValue(session) > 0).length,
+    creditPaymentCount: creditTransactions.filter((tx: any) => tx.type === 'payment').length,
+    transactionCount: sessions.length + purchases.length + creditTransactions.filter((tx: any) => tx.type === 'payment').length,
     topGames: Object.values(topGames)
       .map(game => ({
         ...game,
@@ -593,6 +877,8 @@ async function buildStoreReport(storeId: string, from: Date, to?: Date) {
         cashRevenue: +values.cashRevenue.toFixed(3),
         pointsValue: +values.pointsValue.toFixed(3),
         serviceValue: +values.serviceValue.toFixed(3),
+        creditAdded: +values.creditAdded.toFixed(3),
+        creditPaid: +values.creditPaid.toFixed(3),
         revenue: +values.cashRevenue.toFixed(3),
       }))
       .sort((a, b) => a.date.localeCompare(b.date)),
@@ -695,7 +981,7 @@ async function assertUsernameAvailable(username: string) {
 async function workerStatsForRange(storeId: string, workerId: string, from: Date, to?: Date, includeTransactions = false, pointsPerDt = 50) {
   const createdAt = to ? { gte: from, lt: to } : { gte: from };
 
-  const [sessions, purchases] = await Promise.all([
+  const [sessions, purchases, creditTransactions] = await Promise.all([
     prisma.session.findMany({
       where: { storeId, workerId, createdAt },
       include: includeTransactions
@@ -715,21 +1001,27 @@ async function workerStatsForRange(storeId: string, workerId: string, from: Date
       orderBy: { createdAt: 'desc' },
       take: includeTransactions ? 100 : undefined,
     }),
+    prisma.creditTransaction.findMany({
+      where: { storeId, workerId, createdAt },
+      include: includeTransactions
+        ? { player: { select: { id: true, name: true, username: true } } }
+        : undefined,
+      orderBy: { createdAt: 'desc' },
+      take: includeTransactions ? 100 : undefined,
+    }),
   ]);
 
   const sessionServiceValue = sessions.reduce((sum: number, session: any) => sum + session.totalAmount, 0);
-  const sessionPointsValue = sessions.reduce((sum: number, session: any) => {
-    const value = (session.paidWithPoints ?? 0) / pointsPerDt;
-    return sum + Math.min(session.totalAmount, value);
-  }, 0);
-  const sessionCashRevenue = sessions.reduce((sum: number, session: any) => {
-    const value = (session.paidWithPoints ?? 0) / pointsPerDt;
-    return sum + Math.max(0, session.totalAmount - value);
-  }, 0);
+  const sessionPointsTotal = sessions.reduce((sum: number, session: any) => sum + sessionPointsValue(session, pointsPerDt), 0);
+  const sessionCashRevenue = sessions.reduce((sum: number, session: any) => sum + sessionCashValue(session, pointsPerDt), 0);
+  const sessionCreditAdded = sessions.reduce((sum: number, session: any) => sum + sessionCreditValue(session), 0);
 
   const purchaseCashRevenue = purchases.reduce((sum: number, purchase: any) => sum + (purchase.cashSpent ?? 0), 0);
   const purchasePointsValue = purchases.reduce((sum: number, purchase: any) => sum + ((purchase.pointsSpent ?? 0) / pointsPerDt), 0);
   const purchaseServiceValue = purchaseCashRevenue + purchasePointsValue;
+  const creditPaid = creditTransactions
+    .filter((tx: any) => tx.type === 'payment')
+    .reduce((sum: number, tx: any) => sum + (tx.amountDt ?? 0), 0);
 
   const pointsEarned = sessions.reduce((sum: number, session: any) => sum + session.pointsEarned, 0)
     + purchases.reduce((sum: number, purchase: any) => sum + (purchase.pointsEarned ?? 0), 0);
@@ -743,8 +1035,10 @@ async function workerStatsForRange(storeId: string, workerId: string, from: Date
           type: 'session',
           player: session.player,
           totalAmount: session.totalAmount,
-          cashAmount: +Math.max(0, session.totalAmount - ((session.paidWithPoints ?? 0) / pointsPerDt)).toFixed(3),
-          pointsValue: +Math.min(session.totalAmount, ((session.paidWithPoints ?? 0) / pointsPerDt)).toFixed(3),
+          cashAmount: sessionCashValue(session, pointsPerDt),
+          creditAmount: sessionCreditValue(session),
+          pointsValue: sessionPointsValue(session, pointsPerDt),
+          paymentMethod: session.paymentMethod,
           pointsEarned: session.pointsEarned,
           pointsDeducted: session.paidWithPoints,
           items: session.items,
@@ -762,17 +1056,33 @@ async function workerStatsForRange(storeId: string, workerId: string, from: Date
           pointsDeducted: purchase.pointsSpent,
           createdAt: purchase.createdAt,
         })),
+        ...creditTransactions
+          .filter((tx: any) => tx.type === 'payment')
+          .map((tx: any) => ({
+            id: tx.id,
+            type: 'credit_payment',
+            player: tx.player,
+            totalAmount: tx.amountDt,
+            cashAmount: tx.amountDt,
+            creditAmount: 0,
+            pointsValue: 0,
+            note: tx.note,
+            createdAt: tx.createdAt,
+          })),
       ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     : undefined;
 
   return {
-    transactionCount: sessions.length + purchases.length,
+    transactionCount: sessions.length + purchases.length + creditTransactions.filter((tx: any) => tx.type === 'payment').length,
     sessionCount: sessions.length,
     purchaseCount: purchases.length,
-    revenue: +(sessionCashRevenue + purchaseCashRevenue).toFixed(3),
-    cashRevenue: +(sessionCashRevenue + purchaseCashRevenue).toFixed(3),
-    pointsValue: +(sessionPointsValue + purchasePointsValue).toFixed(3),
+    creditPaymentCount: creditTransactions.filter((tx: any) => tx.type === 'payment').length,
+    revenue: +(sessionCashRevenue + purchaseCashRevenue + creditPaid).toFixed(3),
+    cashRevenue: +(sessionCashRevenue + purchaseCashRevenue + creditPaid).toFixed(3),
+    pointsValue: +(sessionPointsTotal + purchasePointsValue).toFixed(3),
     serviceValue: +(sessionServiceValue + purchaseServiceValue).toFixed(3),
+    creditAdded: +sessionCreditAdded.toFixed(3),
+    creditPaid: +creditPaid.toFixed(3),
     pointsEarned,
     pointsDeducted,
     transactions,

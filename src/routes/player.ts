@@ -100,6 +100,10 @@ playerRouter.post('/stores/:storeId/toggle-mute', handleAsync(async (req: Reques
 }));
 
 // GET /api/player/stats/:storeId
+function creditDelta(tx: { type: string; amountDt: number }) {
+  return tx.type === 'payment' ? -tx.amountDt : tx.amountDt;
+}
+
 playerRouter.get('/stats/:storeId', handleAsync(async (req: Request, res: Response) => {
   const storeId = String(req.params.storeId);
   const playerId = req.user!.id;
@@ -125,9 +129,23 @@ playerRouter.get('/stats/:storeId', handleAsync(async (req: Request, res: Respon
     where: { playerId, storeId: String(storeId) },
     select: { totalAmount: true, pointsEarned: true, createdAt: true },
   });
+  const creditTransactions = await prisma.creditTransaction.findMany({
+    where: { playerId, storeId },
+    select: { type: true, amountDt: true },
+  });
 
   const totalSpent = sessions.reduce((s: number, sess: { totalAmount: number }) => s + sess.totalAmount, 0);
   const totalSessions = sessions.length;
+  const creditBalance = creditTransactions.reduce(
+    (sum: number, tx: { type: string; amountDt: number }) => sum + creditDelta(tx),
+    0,
+  );
+  const creditAdded = creditTransactions
+    .filter((tx: { type: string }) => tx.type !== 'payment')
+    .reduce((sum: number, tx: { amountDt: number }) => sum + tx.amountDt, 0);
+  const creditPaid = creditTransactions
+    .filter((tx: { type: string }) => tx.type === 'payment')
+    .reduce((sum: number, tx: { amountDt: number }) => sum + tx.amountDt, 0);
 
   res.json({
     tier: link.tier,
@@ -135,6 +153,9 @@ playerRouter.get('/stats/:storeId', handleAsync(async (req: Request, res: Respon
     pendingUpgrade: link.pendingUpgrade,
     totalSpent: +totalSpent.toFixed(3),
     totalSessions,
+    creditBalance: +creditBalance.toFixed(3),
+    creditAdded: +creditAdded.toFixed(3),
+    creditPaid: +creditPaid.toFixed(3),
     tierConfig: link.store.tierConfig,
     store: {
       id: link.store.id,
@@ -182,7 +203,7 @@ playerRouter.get('/activity/:storeId', handleAsync(async (req: Request, res: Res
   // Fetch skip + limit + 1 to detect hasMore
   const fetchLimit = skip + limit + 1;
 
-  const [sessions, purchases, qrPayments] = await Promise.all([
+  const [sessions, purchases, qrPayments, creditTransactions] = await Promise.all([
     prisma.session.findMany({
       where: { playerId, storeId },
       orderBy: { createdAt: 'desc' },
@@ -195,6 +216,11 @@ playerRouter.get('/activity/:storeId', handleAsync(async (req: Request, res: Res
     }),
     prisma.qrPayment.findMany({
       where: { playerId, storeId, isUsed: true },
+      orderBy: { createdAt: 'desc' },
+      take: fetchLimit,
+    }),
+    prisma.creditTransaction.findMany({
+      where: { playerId, storeId },
       orderBy: { createdAt: 'desc' },
       take: fetchLimit,
     }),
@@ -226,6 +252,15 @@ playerRouter.get('/activity/:storeId', handleAsync(async (req: Request, res: Res
       earned: 0,
       spent: q.pointsToDeduct,
       date: q.createdAt,
+    })),
+    ...creditTransactions.map(tx => ({
+      id: tx.id,
+      type: tx.type === 'payment' ? 'credit_payment' : 'credit_charge',
+      title: tx.type === 'payment' ? 'CREDIT PAYMENT' : 'CREDIT ADDED',
+      earned: 0,
+      spent: 0,
+      creditAmount: tx.amountDt,
+      date: tx.createdAt,
     })),
   ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
