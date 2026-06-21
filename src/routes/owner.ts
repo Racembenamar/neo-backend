@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { Expo } from 'expo-server-sdk';
 import bcrypt from 'bcryptjs';
 import { sendPushNotification, sendPushNotificationToMultiple } from '../services/notification.service';
+import { formatNotificationDate } from '../lib/i18n';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { addMinutes } from 'date-fns';
@@ -1319,13 +1320,7 @@ ownerRouter.post('/tournaments', handleAsync(async (req: Request, res: Response)
   let title = `🏆 New Tournament in ${store?.name || 'NEO'}`;
   let body = `Join the new tournament: ${tournament.name}! Prize Pool: ${tournament.prizePool}.`;
 
-  const cleanDate = new Date(tournament.date).toLocaleString('en-US', {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'short',
-    hour: '2-digit',
-    minute: '2-digit'
-  });
+  const cleanDate = formatNotificationDate(new Date(tournament.date));
 
   const entryText = tournament.entryPrice && tournament.entryPrice.toLowerCase() !== 'free'
     ? `Entry: ${tournament.entryPrice}`
@@ -2311,13 +2306,7 @@ ownerRouter.put('/matches/:id/schedule', handleAsync(async (req: Request, res: R
 
   // Notify players of referee override
   try {
-    const formattedDate = dateValue.toLocaleString('en-US', {
-      weekday: 'long',
-      day: 'numeric',
-      month: 'short',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
+    const formattedDate = formatNotificationDate(dateValue);
 
     const overrideTitle = '📢 Referee Schedule Locked';
     const overrideBody = `Store owner locked your match for: ${formattedDate}. Check details.`;

@@ -320,6 +320,7 @@ model DeviceToken {
   player    Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
   playerId  String
   token     String   @unique
+  language  String   @default("en")
   createdAt DateTime @default(now())
 
   @@map("device_tokens")

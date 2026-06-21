@@ -5,6 +5,8 @@ import { requireAuth, requireRole } from '../middleware/auth';
 import { handleAsync, AppError } from '../middleware/errorHandler';
 import { z } from 'zod';
 import { sendPushNotification } from '../services/notification.service';
+import { normalizeLanguage } from '../lib/i18n';
+import { formatNotificationDate } from '../lib/i18n';
 import { checkPendingUpgrade } from '../services/tier.service';
 
 export const playerRouter = Router();
@@ -814,13 +816,17 @@ playerRouter.get('/tournaments/:id/participants', handleAsync(async (req: Reques
 
 // POST /api/player/push-token - register device push token
 playerRouter.post('/push-token', handleAsync(async (req: Request, res: Response) => {
-  const { token } = z.object({ token: z.string().min(1) }).parse(req.body);
+  const { token, language } = z.object({
+    token: z.string().min(1),
+    language: z.enum(['en', 'fr']).optional(),
+  }).parse(req.body);
   const playerId = req.user!.id;
+  const preferredLanguage = normalizeLanguage(language || req.headers['x-app-language']);
 
   const deviceToken = await prisma.deviceToken.upsert({
     where: { token },
-    update: { playerId },
-    create: { token, playerId }
+    update: { playerId, language: preferredLanguage } as any,
+    create: { token, playerId, language: preferredLanguage } as any
   });
 
   res.json({ success: true, deviceToken });
@@ -1013,13 +1019,7 @@ playerRouter.post('/matches/:id/propose', handleAsync(async (req: Request, res: 
   const opponentId = match.player1Id === playerId ? match.player2Id : match.player1Id;
   if (opponentId) {
     const senderName = match.player1Id === playerId ? match.player1?.name : match.player2?.name;
-    const formattedDate = dateValue.toLocaleString('en-US', {
-      weekday: 'long',
-      day: 'numeric',
-      month: 'short',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
+    const formattedDate = formatNotificationDate(dateValue);
     await sendPushNotification(
       opponentId,
       '⚔️ New Match Proposal',
@@ -1099,13 +1099,7 @@ playerRouter.post('/matches/:id/accept', handleAsync(async (req: Request, res: R
 
   // Notify both players & store owner
   const opponentId = match.player1Id === playerId ? match.player2Id : match.player1Id;
-  const formattedDate = updated.scheduledAt!.toLocaleString('en-US', {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'short',
-    hour: '2-digit',
-    minute: '2-digit'
-  });
+  const formattedDate = formatNotificationDate(updated.scheduledAt!);
 
   if (opponentId) {
     await sendPushNotification(

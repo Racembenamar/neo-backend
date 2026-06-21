@@ -1,5 +1,6 @@
 import { Expo } from 'expo-server-sdk';
 import { prisma } from '../lib/prisma';
+import { normalizeLanguage, translateText } from '../lib/i18n';
 
 const expo = new Expo();
 
@@ -89,8 +90,8 @@ export async function sendPushNotification(
     messages.push({
       to: dt.token,
       sound: 'default' as const,
-      title,
-      body,
+      title: translateText(title, normalizeLanguage((dt as any).language)),
+      body: translateText(body, normalizeLanguage((dt as any).language)),
       data,
     });
   }
@@ -171,8 +172,8 @@ export async function sendPushNotificationToMultiple(
     messages.push({
       to: dt.token,
       sound: 'default' as const,
-      title,
-      body,
+      title: translateText(title, normalizeLanguage((dt as any).language)),
+      body: translateText(body, normalizeLanguage((dt as any).language)),
       data,
     });
   }
