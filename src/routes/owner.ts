@@ -53,6 +53,8 @@ const WORKER_ROUTE_RULES: Array<{ method: string; pattern: RegExp; permission: W
   { method: 'PUT', pattern: /^\/tournaments\/[^/]+\/blocked-slots$/, permission: 'canScheduleTournament' },
   { method: 'GET', pattern: /^\/tournaments\/[^/]+\/replacement-candidates$/, permission: 'canManageParticipants' },
   { method: 'PUT', pattern: /^\/tournaments\/[^/]+\/replace-player$/, permission: 'canManageParticipants' },
+  { method: 'GET', pattern: /^\/players$/, permission: 'canSearchPlayer' },
+  { method: 'POST', pattern: /^\/players\/[^/]+\/notify$/, permission: 'canCreateAnnouncement' },
 ];
 
 ownerRouter.use(handleAsync(async (req: Request, res: Response, next: NextFunction) => {
@@ -280,7 +282,8 @@ ownerRouter.post('/sessions', handleAsync(async (req: Request, res: Response) =>
         ? cashAmount > 0 ? 'cash_points' : 'points'
         : 'cash';
 
-  const pointsEarned = calculatePointsEarned(totalAmount, playerLink.tier, tierConfig);
+  let creditBalance = await getPlayerCreditBalance(storeId, playerId);
+  const pointsEarned = creditBalance > 0 ? 0 : calculatePointsEarned(totalAmount, playerLink.tier, tierConfig);
   const newTotalPoints = playerLink.totalPoints + pointsEarned - pointsToDeduct;
   const pendingUpgrade = checkPendingUpgrade(newTotalPoints, playerLink.tier, tierConfig);
 
@@ -327,7 +330,7 @@ ownerRouter.post('/sessions', handleAsync(async (req: Request, res: Response) =>
     return s;
   });
 
-  const creditBalance = await getPlayerCreditBalance(storeId, playerId);
+  creditBalance = await getPlayerCreditBalance(storeId, playerId);
 
   if (creditAmount > 0) {
     try {
@@ -708,17 +711,24 @@ ownerRouter.post('/shop/confirm-cash-payment', handleAsync(async (req: Request, 
       where: { playerId_storeId: { playerId: order.playerId, storeId } }
     });
 
+    const creditTransactions = await tx.creditTransaction.findMany({
+      where: { storeId, playerId: order.playerId },
+      select: { type: true, amountDt: true },
+    });
+    const creditBalance = +creditTransactions.reduce((sum: number, tx: { type: string; amountDt: number }) => sum + creditDelta(tx), 0).toFixed(3);
+    const finalPointsEarned = creditBalance > 0 ? 0 : order.pointsToEarn;
+
     if (playerLink) {
       await tx.playerStore.update({
         where: { id: playerLink.id },
-        data: { totalPoints: { increment: order.pointsToEarn } }
+        data: { totalPoints: { increment: finalPointsEarned } }
       });
     } else {
       await tx.playerStore.create({
         data: {
           playerId: order.playerId,
           storeId,
-          totalPoints: order.pointsToEarn,
+          totalPoints: finalPointsEarned,
           tier: 1
         }
       });
@@ -732,7 +742,7 @@ ownerRouter.post('/shop/confirm-cash-payment', handleAsync(async (req: Request, 
         productName: pendingOrder.product.name,
         pointsSpent: 0,
         cashSpent: order.amountDt,
-        pointsEarned: order.pointsToEarn,
+        pointsEarned: finalPointsEarned,
         workerId: req.user!.role === 'worker' ? req.user!.id : undefined
       }
     });
@@ -2680,6 +2690,150 @@ ownerRouter.put('/store', handleAsync(async (req: Request, res: Response) => {
     data,
   });
   res.json(updatedStore);
+}));
+
+// ─────────────────────────────────────────────
+// PLAYERS (CLIENTS) MANAGEMENT
+// ─────────────────────────────────────────────
+
+ownerRouter.get('/players', handleAsync(async (req: Request, res: Response) => {
+  const storeId = req.user!.storeId!;
+
+  // Fetch players who have at least one session, purchase, or credit transaction in the store
+  const players = await prisma.player.findMany({
+    where: {
+      OR: [
+        { sessions: { some: { storeId } } },
+        { purchases: { some: { storeId } } },
+        { creditTransactions: { some: { storeId } } },
+      ],
+    },
+    select: {
+      id: true,
+      name: true,
+      username: true,
+      phone: true,
+      avatarUrl: true,
+      avatarSeed: true,
+      createdAt: true,
+      storeLinks: {
+        where: { storeId },
+        select: {
+          tier: true,
+          totalPoints: true,
+          joinedAt: true,
+        },
+      },
+      sessions: {
+        where: { storeId },
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+        select: { createdAt: true },
+      },
+      purchases: {
+        where: { storeId },
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+        select: { createdAt: true },
+      },
+      creditTransactions: {
+        where: { storeId },
+        select: { type: true, amountDt: true, createdAt: true },
+      },
+    },
+  });
+
+  const formattedPlayers = players.map(player => {
+    const link = player.storeLinks[0];
+    
+    // Calculate last active timestamp
+    const dates = [
+      player.sessions[0]?.createdAt,
+      player.purchases[0]?.createdAt,
+      ...player.creditTransactions.slice(0, 1).map(t => t.createdAt)
+    ].filter(Boolean) as Date[];
+    
+    const lastActiveAt = dates.length > 0
+      ? new Date(Math.max(...dates.map(d => new Date(d).getTime())))
+      : player.createdAt;
+
+    // Calculate credit balance
+    const creditBalance = +player.creditTransactions.reduce(
+      (sum, tx) => sum + (tx.type === 'payment' ? -tx.amountDt : tx.amountDt),
+      0
+    ).toFixed(3);
+
+    return {
+      id: player.id,
+      name: player.name,
+      username: player.username,
+      phone: player.phone,
+      avatarUrl: player.avatarUrl,
+      avatarSeed: player.avatarSeed,
+      tier: link?.tier ?? 1,
+      points: link?.totalPoints ?? 0,
+      joinedAt: link?.joinedAt ?? player.createdAt,
+      lastActiveAt,
+      creditBalance,
+    };
+  });
+
+  res.json(formattedPlayers);
+}));
+
+ownerRouter.post('/players/:id/notify', handleAsync(async (req: Request, res: Response) => {
+  const storeId = req.user!.storeId!;
+  const playerId = String(req.params.id);
+  
+  const notifySchema = z.object({
+    title: z.string().min(1).max(100),
+    body: z.string().min(1).max(500),
+  });
+  
+  const { title, body } = notifySchema.parse(req.body);
+  
+  const player = await prisma.player.findUnique({
+    where: { id: playerId },
+    select: { id: true },
+  });
+  if (!player) throw new AppError(404, 'Player not found');
+  
+  // Verify they are associated with the store
+  const link = await prisma.playerStore.findUnique({
+    where: { playerId_storeId: { playerId, storeId } },
+  });
+  if (!link) {
+    // Check if they had at least one transaction as fallback
+    const hasTx = await prisma.creditTransaction.findFirst({ where: { storeId, playerId } }) ||
+                 await prisma.session.findFirst({ where: { storeId, playerId } }) ||
+                 await prisma.purchase.findFirst({ where: { storeId, playerId } });
+    if (!hasTx) {
+      throw new AppError(400, 'Player is not associated with this store');
+    }
+  }
+  
+  // Create system notification
+  await prisma.notification.create({
+    data: {
+      storeId,
+      playerId,
+      title,
+      body,
+      type: 'custom_alert',
+    },
+  });
+  
+  // Send push notification
+  try {
+    await sendPushNotification(playerId, title, body, {
+      type: 'custom_alert',
+      storeId,
+    });
+  } catch (err) {
+    console.error('Failed to send push notification to player:', err);
+  }
+  
+  res.json({ success: true });
 }));
 
 
