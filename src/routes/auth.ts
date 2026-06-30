@@ -156,7 +156,7 @@ async function uniqueGoogleUsername(email: string) {
 authRouter.post('/register', handleAsync(async (req: Request, res: Response) => {
   const { username, password, name, phone } = playerRegisterSchema.parse(req.body);
   const email = normalizeEmail(req.body.email);
-  
+
   const existing = await prisma.player.findUnique({ where: { username } });
   if (existing) {
     res.status(400).json({ error: 'Username already exists' });
@@ -201,7 +201,7 @@ authRouter.post('/login', handleAsync(async (req: Request, res: Response) => {
   let storeId: string | undefined = undefined;
 
   const admin = await prisma.admin.findUnique({ where: { username } });
-  
+
   if (admin) {
     user = admin;
     role = 'admin';
