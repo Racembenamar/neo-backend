@@ -85,8 +85,7 @@ async function sendPasswordResetEmail(email: string, code: string) {
   const text = `${appName} password reset code: ${code}. This code expires in 15 minutes.`;
 
   if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
-    console.warn(`[AUTH] Gmail SMTP is not configured. Password reset code for ${email}: ${code}`);
-    return;
+    throw new AppError(500, 'Gmail SMTP is not configured');
   }
 
   const transporter = nodemailer.createTransport({
@@ -97,13 +96,18 @@ async function sendPasswordResetEmail(email: string, code: string) {
     },
   });
 
-  await transporter.sendMail({
-    from: process.env.MAIL_FROM || `"${appName}" <${process.env.GMAIL_USER}>`,
-    to: email,
-    subject,
-    html,
-    text,
-  });
+  try {
+    await transporter.sendMail({
+      from: process.env.MAIL_FROM || `"${appName}" <${process.env.GMAIL_USER}>`,
+      to: email,
+      subject,
+      html,
+      text,
+    });
+  } catch (err: any) {
+    console.error('[AUTH] Gmail reset email failed:', err?.message || err);
+    throw new AppError(502, 'Failed to send reset email through Gmail');
+  }
 }
 
 async function verifyGoogleIdToken(idToken: string) {
@@ -349,7 +353,13 @@ authRouter.post('/forgot-password', handleAsync(async (req: Request, res: Respon
     },
   });
 
-  await sendPasswordResetEmail(email, code);
+  try {
+    await sendPasswordResetEmail(email, code);
+  } catch (err) {
+    resetCooldown.delete(email);
+    throw err;
+  }
+
   res.json(genericResponse);
 }));
 
