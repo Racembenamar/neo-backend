@@ -194,20 +194,29 @@ authRouter.post('/register', handleAsync(async (req: Request, res: Response) => 
 
 // POST /api/auth/login
 authRouter.post('/login', handleAsync(async (req: Request, res: Response) => {
-  const { username, password } = loginSchema.parse(req.body);
+  const { username: rawLoginId, password } = loginSchema.parse(req.body);
+  const loginId = rawLoginId.trim();
+  const emailLogin = loginId.includes('@') ? normalizeEmail(loginId) : null;
 
   let user: any = null;
   let role: string = '';
   let storeId: string | undefined = undefined;
 
-  const admin = await prisma.admin.findUnique({ where: { username } });
+  const admin = await prisma.admin.findFirst({
+    where: { username: { equals: loginId, mode: 'insensitive' } },
+  });
 
   if (admin) {
     user = admin;
     role = 'admin';
   } else {
-    const player = await prisma.player.findUnique({
-      where: { username },
+    const player = await prisma.player.findFirst({
+      where: {
+        OR: [
+          { username: { equals: loginId, mode: 'insensitive' } },
+          ...(emailLogin ? [{ email: { equals: emailLogin, mode: 'insensitive' as const } }] : []),
+        ],
+      },
       include: { ownedStore: true },
     });
     if (player) {
@@ -217,8 +226,8 @@ authRouter.post('/login', handleAsync(async (req: Request, res: Response) => {
         storeId = player.ownedStore.id;
       }
     } else {
-      const worker = await prisma.storeWorker.findUnique({
-        where: { username },
+      const worker = await prisma.storeWorker.findFirst({
+        where: { username: { equals: loginId, mode: 'insensitive' } },
       });
       if (worker) {
         if (!worker.isActive) {
