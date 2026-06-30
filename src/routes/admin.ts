@@ -205,6 +205,7 @@ adminRouter.get('/users', handleAsync(async (req: Request, res: Response) => {
     where.OR = [
       { username: { contains: searchStr, mode: 'insensitive' } },
       { name: { contains: searchStr, mode: 'insensitive' } },
+      { email: { contains: searchStr, mode: 'insensitive' } },
       { phone: { contains: searchStr, mode: 'insensitive' } }
     ];
   }
@@ -223,6 +224,8 @@ adminRouter.get('/users', handleAsync(async (req: Request, res: Response) => {
     id: user.id,
     username: user.username,
     name: user.name,
+    email: user.email,
+    emailVerified: user.emailVerified,
     phone: user.phone,
     avatarSeed: user.avatarSeed,
     avatarUrl: user.avatarUrl,
@@ -239,6 +242,7 @@ adminRouter.get('/users', handleAsync(async (req: Request, res: Response) => {
 const updateUserFieldsSchema = z.object({
   name: z.string().min(2).optional(),
   username: z.string().min(3).optional(),
+  email: z.string().email().optional().nullable(),
   phone: z.string().optional().nullable(),
   password: z.string().min(6).optional()
 });
@@ -246,7 +250,7 @@ const updateUserFieldsSchema = z.object({
 // PUT /api/admin/users/:id
 adminRouter.put('/users/:id', handleAsync(async (req: Request, res: Response) => {
   const playerId = String(req.params.id);
-  const { name, username, phone, password } = updateUserFieldsSchema.parse(req.body);
+  const { name, username, email, phone, password } = updateUserFieldsSchema.parse(req.body);
 
   const player = await prisma.player.findUnique({ where: { id: playerId } });
   if (!player) throw new AppError(404, 'User not found');
@@ -255,10 +259,16 @@ adminRouter.put('/users/:id', handleAsync(async (req: Request, res: Response) =>
     const existing = await prisma.player.findUnique({ where: { username } });
     if (existing) throw new AppError(409, 'Username already taken');
   }
+  const normalizedEmail = email ? email.trim().toLowerCase() : email;
+  if (normalizedEmail && normalizedEmail !== player.email) {
+    const existing = await prisma.player.findUnique({ where: { email: normalizedEmail } });
+    if (existing) throw new AppError(409, 'Email already taken');
+  }
 
   const data: Prisma.PlayerUpdateInput = {};
   if (name) data.name = name;
   if (username) data.username = username;
+  if (email !== undefined) data.email = normalizedEmail;
   if (phone !== undefined) data.phone = phone;
   if (password) {
     data.passwordHash = await bcrypt.hash(password, 10);
@@ -267,7 +277,7 @@ adminRouter.put('/users/:id', handleAsync(async (req: Request, res: Response) =>
   const updated = await prisma.player.update({
     where: { id: playerId },
     data,
-    select: { id: true, username: true, name: true, phone: true, createdAt: true }
+    select: { id: true, username: true, name: true, email: true, emailVerified: true, phone: true, createdAt: true }
   });
 
   res.json(updated);

@@ -832,18 +832,27 @@ playerRouter.post('/push-token', handleAsync(async (req: Request, res: Response)
   res.json({ success: true, deviceToken });
 }));
 
-// PUT /api/player/profile - update display name or phone
+// PUT /api/player/profile - update display name, email, or phone
 playerRouter.put('/profile', handleAsync(async (req: Request, res: Response) => {
-  const { name, phone, avatarSeed, avatarUrl } = z.object({
+  const { name, email, phone, avatarSeed, avatarUrl } = z.object({
     name: z.string().min(2).optional(),
+    email: z.string().email().optional(),
     phone: z.string().optional(),
     avatarSeed: z.string().optional(),
     avatarUrl: z.string().optional(),
   }).parse(req.body);
+
+  const normalizedEmail = email?.trim().toLowerCase();
+  if (normalizedEmail) {
+    const existing = await prisma.player.findUnique({ where: { email: normalizedEmail } });
+    if (existing && existing.id !== req.user!.id) {
+      throw new AppError(409, 'Email already exists');
+    }
+  }
   
   const updated = await prisma.player.update({
     where: { id: (req as any).user!.id },
-    data: { name, phone, avatarSeed, avatarUrl },
+    data: { name, email: normalizedEmail, phone, avatarSeed, avatarUrl },
   });
   
   res.json({ 
@@ -851,6 +860,8 @@ playerRouter.put('/profile', handleAsync(async (req: Request, res: Response) => 
       id: updated.id, 
       username: updated.username, 
       name: updated.name, 
+      email: updated.email,
+      emailVerified: updated.emailVerified,
       phone: updated.phone, 
       avatarSeed: updated.avatarSeed,
       avatarUrl: updated.avatarUrl,
@@ -868,6 +879,7 @@ playerRouter.put('/reset-password', handleAsync(async (req: Request, res: Respon
 
   const player = await prisma.player.findUnique({ where: { id: req.user!.id } });
   if (!player) throw new AppError(404, 'Player not found');
+  if (!player.passwordHash) throw new AppError(400, 'This account uses Google sign-in');
 
   const valid = await bcrypt.compare(oldPassword, player.passwordHash);
   if (!valid) throw new AppError(401, 'Invalid old password');

@@ -23,8 +23,14 @@ model Admin {
 model Player {
   id           String        @id @default(uuid())
   username     String        @unique
-  passwordHash String
+  passwordHash String?
   name         String
+  email        String?       @unique
+  emailVerified Boolean      @default(false)
+  googleId     String?       @unique
+  authProvider String        @default("password")
+  passwordResetCodeHash String?
+  passwordResetExpiresAt DateTime?
   phone        String?
   avatarSeed   String?
   avatarUrl    String?
