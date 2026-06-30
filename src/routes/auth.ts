@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import nodemailer from 'nodemailer';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { requireAuth } from '../middleware/auth';
@@ -71,40 +72,38 @@ function playerAuthResponse(player: any, role: 'player' | 'owner' = 'player', st
 }
 
 async function sendPasswordResetEmail(email: string, code: string) {
-  if (!process.env.RESEND_API_KEY) {
-    console.warn(`[AUTH] RESEND_API_KEY is not configured. Password reset code for ${email}: ${code}`);
+  const appName = process.env.APP_NAME || 'NEO';
+  const subject = `${appName} password reset code`;
+  const html = `
+    <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111">
+      <h2>${appName} password reset</h2>
+      <p>Use this code to reset your password:</p>
+      <p style="font-size:28px;font-weight:700;letter-spacing:6px">${code}</p>
+      <p>This code expires in 15 minutes. If you did not request it, you can ignore this email.</p>
+    </div>
+  `;
+  const text = `${appName} password reset code: ${code}. This code expires in 15 minutes.`;
+
+  if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
+    console.warn(`[AUTH] Gmail SMTP is not configured. Password reset code for ${email}: ${code}`);
     return;
   }
 
-  const from = process.env.RESEND_FROM_EMAIL || 'NEO <onboarding@resend.dev>';
-  const appName = process.env.APP_NAME || 'NEO';
-
-  const response = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-      'Content-Type': 'application/json',
+  const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: process.env.GMAIL_USER,
+      pass: process.env.GMAIL_APP_PASSWORD,
     },
-    body: JSON.stringify({
-      from,
-      to: email,
-      subject: `${appName} password reset code`,
-      html: `
-        <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111">
-          <h2>${appName} password reset</h2>
-          <p>Use this code to reset your password:</p>
-          <p style="font-size:28px;font-weight:700;letter-spacing:6px">${code}</p>
-          <p>This code expires in 15 minutes. If you did not request it, you can ignore this email.</p>
-        </div>
-      `,
-      text: `${appName} password reset code: ${code}. This code expires in 15 minutes.`,
-    }),
   });
 
-  if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    throw new AppError(502, `Failed to send reset email${body ? `: ${body}` : ''}`);
-  }
+  await transporter.sendMail({
+    from: process.env.MAIL_FROM || `"${appName}" <${process.env.GMAIL_USER}>`,
+    to: email,
+    subject,
+    html,
+    text,
+  });
 }
 
 async function verifyGoogleIdToken(idToken: string) {
